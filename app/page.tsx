@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 import { ensureWorkspace } from '@/app/actions/auth';
@@ -63,6 +64,15 @@ export default async function Home() {
           <dd className="mt-1 font-mono text-sm">{workspace?.dlt_registered ? 'yes' : 'no'}</dd>
         </div>
       </dl>
+
+      <nav className="flex flex-wrap gap-3">
+        <Link
+          href="/sourcing"
+          className="rounded-md border px-3 py-1.5 text-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          Sourcing
+        </Link>
+      </nav>
     </main>
   );
 }

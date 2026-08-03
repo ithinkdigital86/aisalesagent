@@ -80,29 +80,55 @@ export async function sourceFromApollo(
     q_organization_keyword_tags: opts.filters.industries ?? [],
   };
 
+  // Never pay Apollo twice for an identical search inside the cache window.
+  // enrichment_cache is shared across workspaces and service-role only, so the
+  // sourcing route runs this under the service client.
+  const cacheKey = `search:${crypto
+    .createHash('sha256')
+    .update(JSON.stringify(body))
+    .digest('hex')
+    .slice(0, 48)}`;
+
   let people: ApolloPerson[] = [];
   let creditsUsed = 0;
 
   try {
-    const res = await fetch(APOLLO_SEARCH, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cache-Control': 'no-cache',
-        'x-api-key': process.env.APOLLO_API_KEY!,
-      },
-      body: JSON.stringify(body),
-    });
+    const { data: cached } = await db
+      .from('enrichment_cache')
+      .select('payload, expires_at')
+      .eq('provider', 'apollo')
+      .eq('cache_key', cacheKey)
+      .maybeSingle();
 
-    if (!res.ok) {
-      const text = await res.text();
-      await db.from('sourcing_runs').update({ error: `apollo_${res.status}: ${text.slice(0, 400)}` }).eq('id', runId);
-      throw new Error(`Apollo returned ${res.status}`);
+    if (cached && new Date(cached.expires_at as string).getTime() > Date.now()) {
+      // Cache hit: reuse the stored response and spend no Apollo credits.
+      people = (cached.payload as { people?: ApolloPerson[] }).people ?? [];
+    } else {
+      const res = await fetch(APOLLO_SEARCH, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-cache',
+          'x-api-key': process.env.APOLLO_API_KEY!,
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        await db.from('sourcing_runs').update({ error: `apollo_${res.status}: ${text.slice(0, 400)}` }).eq('id', runId);
+        throw new Error(`Apollo returned ${res.status}`);
+      }
+
+      const json = (await res.json()) as { people?: ApolloPerson[] };
+      people = json.people ?? [];
+      creditsUsed = people.length;
+
+      await db.from('enrichment_cache').upsert(
+        { provider: 'apollo', cache_key: cacheKey, payload: json as unknown as Json },
+        { onConflict: 'provider,cache_key' }
+      );
     }
-
-    const json = (await res.json()) as { people?: ApolloPerson[] };
-    people = json.people ?? [];
-    creditsUsed = people.length;
   } catch (err) {
     await db
       .from('sourcing_runs')
