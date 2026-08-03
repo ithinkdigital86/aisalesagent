@@ -8,6 +8,7 @@
 
 import crypto from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { Json } from '@/types/database';
 
 const APOLLO_SEARCH = 'https://api.apollo.io/api/v1/mixed_people/search';
 
@@ -60,7 +61,7 @@ export async function sourceFromApollo(
       workspace_id: opts.workspaceId,
       icp_profile_id: opts.icpProfileId,
       source: 'apollo',
-      filters_used: opts.filters as unknown as Record<string, unknown>,
+      filters_used: opts.filters as unknown as Json,
     })
     .select('id')
     .single();
@@ -182,7 +183,7 @@ export async function sourceFromApollo(
       phone: p.organization?.phone ?? null,
       linkedin_url: p.linkedin_url,
       stage: 'sourced',
-      raw: p as unknown as Record<string, unknown>,
+      raw: p as unknown as Json,
     });
 
     // 23505 is the unique-violation code: the dedupe index caught a repeat.

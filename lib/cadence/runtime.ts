@@ -6,6 +6,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { SupabaseClient } from '@supabase/supabase-js';
+import type { Database, Json, Tables } from '@/types/database';
 import { AGENTS, type AgentSlug, type ContextScope } from './registry';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
@@ -17,8 +18,57 @@ export interface RunResult<T = unknown> {
   runId?: string;
 }
 
+/**
+ * The slice of the shared brain assembled for an agent, typed to the schema.
+ * Each field is a projection of the exact columns loadContext selects, so an
+ * agent only ever sees the shape it declared in its `reads` scope.
+ */
+export interface AgentContext {
+  lead?: Pick<
+    Tables<'leads'>,
+    | 'id'
+    | 'full_name'
+    | 'title'
+    | 'seniority'
+    | 'company_name'
+    | 'company_domain'
+    | 'employee_count'
+    | 'industry'
+    | 'country'
+    | 'timezone'
+    | 'stage'
+    | 'fit_score'
+    | 'fit_reasoning'
+  > | null;
+  triggers?: Pick<Tables<'lead_triggers'>, 'trigger_type' | 'headline' | 'detected_at'>[];
+  consent?: Pick<
+    Tables<'consent_records'>,
+    'basis' | 'channels' | 'captured_at' | 'expires_at'
+  >[];
+  history?: Pick<
+    Tables<'actions'>,
+    | 'agent'
+    | 'channel'
+    | 'step_number'
+    | 'subject'
+    | 'body'
+    | 'status'
+    | 'sent_at'
+    | 'opened_at'
+    | 'replied_at'
+    | 'reply_body'
+    | 'reply_sentiment'
+  >[];
+  sequence?: Pick<Tables<'sequences'>, 'name' | 'steps' | 'reply_count' | 'sent_count'> | null;
+  memory?: Pick<
+    Tables<'agent_memory'>,
+    'agent' | 'memory_type' | 'content' | 'success_rate' | 'sample_size' | 'confidence'
+  >[];
+  pipeline?: { byStage: Record<string, number>; total: number };
+}
+
 export async function runAgent<T = unknown>(
-  db: SupabaseClient,
+  db: SupabaseClient<Database>,
   opts: {
     agent: AgentSlug;
     workspaceId: string;
@@ -88,19 +138,18 @@ function stripFences(text: string): string {
 }
 
 async function loadContext(
-  db: SupabaseClient,
+  db: SupabaseClient<Database>,
   scopes: ContextScope[],
   opts: { workspaceId: string; leadId?: string }
-): Promise<Record<string, unknown>> {
-  const ctx: Record<string, unknown> = {};
+): Promise<AgentContext> {
+  const ctx: AgentContext = {};
   const { workspaceId, leadId } = opts;
 
   if (scopes.includes('lead') && leadId) {
     const { data } = await db
       .from('leads')
       .select(
-        'id, full_name, title, seniority, company_name, company_domain, ' +
-          'employee_count, industry, country, timezone, stage, fit_score, fit_reasoning'
+        'id, full_name, title, seniority, company_name, company_domain, employee_count, industry, country, timezone, stage, fit_score, fit_reasoning'
       )
       .eq('id', leadId)
       .eq('workspace_id', workspaceId)
@@ -132,8 +181,7 @@ async function loadContext(
     const { data } = await db
       .from('actions')
       .select(
-        'agent, channel, step_number, subject, body, status, sent_at, ' +
-          'opened_at, replied_at, reply_body, reply_sentiment'
+        'agent, channel, step_number, subject, body, status, sent_at, opened_at, replied_at, reply_body, reply_sentiment'
       )
       .eq('lead_id', leadId)
       .order('created_at', { ascending: true })
@@ -184,7 +232,7 @@ async function loadContext(
 }
 
 async function logRun(
-  db: SupabaseClient,
+  db: SupabaseClient<Database>,
   a: {
     agent: AgentSlug;
     workspaceId: string;
@@ -209,7 +257,7 @@ async function logRun(
       duration_ms: Date.now() - a.started,
       ok: a.ok,
       error: a.error ?? null,
-      raw_output: a.output ?? null,
+      raw_output: (a.output ?? null) as Json,
     })
     .select('id')
     .single();
