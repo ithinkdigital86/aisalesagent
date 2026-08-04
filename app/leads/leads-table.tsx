@@ -32,6 +32,8 @@ const STAGES = [
 
 // The Qualifier route accepts at most 50 lead ids per call.
 const MAX_QUALIFY = 50;
+// Drafting spends an Opus call per lead, so keep a batch small.
+const MAX_DRAFT = 10;
 
 export function LeadsTable({
   workspaceId,
@@ -47,6 +49,7 @@ export function LeadsTable({
   const router = useRouter();
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [pending, setPending] = React.useState(false);
+  const [drafting, setDrafting] = React.useState(false);
 
   const allSelected = leads.length > 0 && selected.size === leads.length;
 
@@ -107,6 +110,39 @@ export function LeadsTable({
     }
   }
 
+  async function draftEmails() {
+    const leadIds = [...selected];
+    if (leadIds.length === 0) return;
+    if (leadIds.length > MAX_DRAFT) {
+      toast.error(`Draft at most ${MAX_DRAFT} at once.`);
+      return;
+    }
+
+    setDrafting(true);
+    let ok = 0;
+    try {
+      for (const leadId of leadIds) {
+        const response = await fetch('/api/agents/email-specialist', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId, leadId }),
+        });
+        if (response.ok) ok += 1;
+      }
+      toast.success(
+        `Drafted ${ok} of ${leadIds.length}. Process the send queue from the dashboard to send.`
+      );
+      setSelected(new Set());
+      router.refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Something went wrong');
+    } finally {
+      setDrafting(false);
+    }
+  }
+
+  const busy = pending || drafting;
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -136,7 +172,15 @@ export function LeadsTable({
 
         <div className="ml-auto flex items-center gap-3">
           <span className="text-sm text-muted-foreground">{selected.size} selected</span>
-          <Button size="sm" disabled={pending || selected.size === 0} onClick={runQualifier}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy || selected.size === 0}
+            onClick={draftEmails}
+          >
+            {drafting ? 'Drafting' : 'Draft emails'}
+          </Button>
+          <Button size="sm" disabled={busy || selected.size === 0} onClick={runQualifier}>
             {pending ? 'Running' : 'Run Qualifier'}
           </Button>
         </div>
