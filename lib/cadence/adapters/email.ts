@@ -30,6 +30,15 @@ export type SendEmailResult =
   | { status: 'blocked'; actionId: string | null; reason: string }
   | { status: 'failed'; actionId: string | null; error: string };
 
+/** Shape of a queued email action the send queue hands to the adapter. */
+export interface QueuedEmailAction {
+  id: string;
+  workspace_id: string;
+  lead_id: string;
+  subject: string | null;
+  body: string;
+}
+
 function appUrl(): string {
   const explicit = process.env.NEXT_PUBLIC_APP_URL;
   if (explicit) return explicit.replace(/\/$/, '');
@@ -85,6 +94,36 @@ function withUnsubscribe(body: string, url: string): string {
   return `${body}\n\nTo stop receiving these emails, unsubscribe here: ${url}`;
 }
 
+/** The single place the network call to Resend happens. */
+async function postToResend(params: {
+  to: string;
+  subject: string;
+  text: string;
+  listUnsubscribe: string;
+}): Promise<{ ok: true; id: string | null } | { ok: false; error: string }> {
+  const response = await fetch(RESEND_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${process.env.RESEND_API_KEY!}`,
+    },
+    body: JSON.stringify({
+      from: process.env.EMAIL_FROM!,
+      to: [params.to],
+      subject: params.subject,
+      text: params.text,
+      headers: { 'List-Unsubscribe': `<${params.listUnsubscribe}>` },
+    }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    return { ok: false, error: `resend_${response.status}: ${text.slice(0, 300)}` };
+  }
+  const json = (await response.json()) as { id?: string };
+  return { ok: true, id: json.id ?? null };
+}
+
 export async function sendEmail(
   db: SupabaseClient,
   input: SendEmailInput
@@ -119,8 +158,7 @@ export async function sendEmail(
     return { status: 'blocked', actionId: (data?.id as string) ?? null, reason: verdict.reason };
   }
 
-  // 2. Recipient address. The gate already confirmed it exists, but re-read it
-  //    here since we need the value to build the unsubscribe link and send.
+  // 2. Recipient address.
   const { data: lead } = await db
     .from('leads')
     .select('email')
@@ -160,38 +198,20 @@ export async function sendEmail(
     return { status: 'awaiting_approval', actionId };
   }
 
-  // 5. Send via Resend.
+  // 5. Send.
   try {
-    const response = await fetch(RESEND_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${process.env.RESEND_API_KEY!}`,
-      },
-      body: JSON.stringify({
-        from: process.env.EMAIL_FROM!,
-        to: [email],
-        subject,
-        text: bodyWithUnsub,
-        headers: { 'List-Unsubscribe': `<${url}>` },
-      }),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      const reason = `resend_${response.status}: ${text.slice(0, 300)}`;
+    const sent = await postToResend({ to: email, subject, text: bodyWithUnsub, listUnsubscribe: url });
+    if (!sent.ok) {
       if (actionId) {
-        await db.from('actions').update({ status: 'failed', block_reason: reason }).eq('id', actionId);
+        await db.from('actions').update({ status: 'failed', block_reason: sent.error }).eq('id', actionId);
       }
-      return { status: 'failed', actionId, error: `Resend returned ${response.status}` };
+      return { status: 'failed', actionId, error: sent.error };
     }
-
-    const json = (await response.json()) as { id?: string };
     const now = new Date().toISOString();
     if (actionId) {
       await db
         .from('actions')
-        .update({ status: 'sent', sent_at: now, provider_message_id: json.id ?? null })
+        .update({ status: 'sent', sent_at: now, provider_message_id: sent.id })
         .eq('id', actionId);
     }
     await db
@@ -199,13 +219,93 @@ export async function sendEmail(
       .update({ last_contacted_at: now })
       .eq('id', leadId)
       .eq('workspace_id', workspaceId);
-
-    return { status: 'sent', actionId, providerMessageId: json.id ?? null };
+    return { status: 'sent', actionId, providerMessageId: sent.id };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown_error';
     if (actionId) {
       await db.from('actions').update({ status: 'failed', block_reason: message }).eq('id', actionId);
     }
     return { status: 'failed', actionId, error: message };
+  }
+}
+
+/**
+ * Deliver an email action that was already queued (by the email-specialist
+ * route). Re-runs the consent gate at send time, records the basis, sends, and
+ * updates the existing row. Used by the send-queue cron and its manual trigger.
+ */
+export async function deliverQueuedEmailAction(
+  db: SupabaseClient,
+  action: QueuedEmailAction
+): Promise<SendEmailResult> {
+  const verdict = await evaluateConsent(db, {
+    workspaceId: action.workspace_id,
+    leadId: action.lead_id,
+    channel: 'email',
+  });
+
+  if (!verdict.allowed) {
+    await db
+      .from('actions')
+      .update({ status: 'blocked', block_reason: verdict.reason })
+      .eq('id', action.id);
+    return { status: 'blocked', actionId: action.id, reason: verdict.reason };
+  }
+
+  if (verdict.requiresApproval) {
+    await db
+      .from('actions')
+      .update({ status: 'awaiting_approval', consent_basis: verdict.basis })
+      .eq('id', action.id);
+    return { status: 'awaiting_approval', actionId: action.id };
+  }
+
+  const { data: lead } = await db
+    .from('leads')
+    .select('email')
+    .eq('id', action.lead_id)
+    .eq('workspace_id', action.workspace_id)
+    .single();
+  const email = (lead?.email as string | null) ?? null;
+  if (!email) {
+    await db
+      .from('actions')
+      .update({ status: 'blocked', block_reason: 'no_email', consent_basis: verdict.basis })
+      .eq('id', action.id);
+    return { status: 'blocked', actionId: action.id, reason: 'no_email' };
+  }
+
+  const url = unsubscribeUrl(action.workspace_id, email);
+  const text = withUnsubscribe(action.body, url);
+
+  // Record the basis before the send.
+  await db.from('actions').update({ consent_basis: verdict.basis }).eq('id', action.id);
+
+  try {
+    const sent = await postToResend({
+      to: email,
+      subject: action.subject ?? '',
+      text,
+      listUnsubscribe: url,
+    });
+    if (!sent.ok) {
+      await db.from('actions').update({ status: 'failed', block_reason: sent.error }).eq('id', action.id);
+      return { status: 'failed', actionId: action.id, error: sent.error };
+    }
+    const now = new Date().toISOString();
+    await db
+      .from('actions')
+      .update({ status: 'sent', sent_at: now, provider_message_id: sent.id, body: text })
+      .eq('id', action.id);
+    await db
+      .from('leads')
+      .update({ last_contacted_at: now })
+      .eq('id', action.lead_id)
+      .eq('workspace_id', action.workspace_id);
+    return { status: 'sent', actionId: action.id, providerMessageId: sent.id };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'unknown_error';
+    await db.from('actions').update({ status: 'failed', block_reason: message }).eq('id', action.id);
+    return { status: 'failed', actionId: action.id, error: message };
   }
 }
