@@ -1,7 +1,3 @@
 {
-  "crons": [
-    { "path": "/api/cron/follow-up", "schedule": "0 */6 * * *" },
-    { "path": "/api/cron/sales-manager", "schedule": "30 3 * * *" },
-    { "path": "/api/cron/send-queue", "schedule": "*/15 * * * *" }
-  ]
+  "crons": []
 }
