@@ -56,19 +56,29 @@ export default async function Home() {
   }
   const workspaceId = workspace?.id as string;
 
-  const [{ data: leads }, { data: actions }, { data: runs }, { data: sm }] = await Promise.all([
-    db.from('leads').select('stage').eq('workspace_id', workspaceId),
-    db.from('actions').select('channel, status, replied_at').eq('workspace_id', workspaceId),
-    db.from('agent_runs').select('model, input_tokens, output_tokens').eq('workspace_id', workspaceId),
-    db
-      .from('agent_runs')
-      .select('raw_output, created_at')
-      .eq('workspace_id', workspaceId)
-      .eq('agent', 'sales_manager')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-  ]);
+  const [{ data: leads }, { data: actions }, { data: runs }, { data: sm }, { data: recent }] =
+    await Promise.all([
+      db.from('leads').select('stage').eq('workspace_id', workspaceId),
+      db.from('actions').select('channel, status, replied_at').eq('workspace_id', workspaceId),
+      db
+        .from('agent_runs')
+        .select('model, input_tokens, output_tokens')
+        .eq('workspace_id', workspaceId),
+      db
+        .from('agent_runs')
+        .select('raw_output, created_at')
+        .eq('workspace_id', workspaceId)
+        .eq('agent', 'sales_manager')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      db
+        .from('actions')
+        .select('id, channel, status, subject, block_reason, lead:leads(full_name, company_name)')
+        .eq('workspace_id', workspaceId)
+        .order('created_at', { ascending: false })
+        .limit(8),
+    ]);
 
   const totalLeads = leads?.length ?? 0;
   const byStage: Record<string, number> = {};
@@ -206,6 +216,38 @@ export default async function Home() {
       </section>
 
       <section className="rounded-xl border p-5">
+        <h2 className="mb-4 text-sm font-medium text-muted-foreground">Recent activity</h2>
+        {!recent || recent.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No outbound actions yet. Draft an email from the{' '}
+            <Link href="/leads" className="text-foreground underline underline-offset-4">
+              leads
+            </Link>{' '}
+            page, then process the send queue.
+          </p>
+        ) : (
+          <ul className="divide-y">
+            {recent.map((action) => (
+              <li key={action.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs text-muted-foreground">{action.channel}</span>
+                    <span className="truncate">{leadLabel(action.lead)}</span>
+                  </div>
+                  {action.block_reason ? (
+                    <div className="truncate text-xs text-destructive">{action.block_reason}</div>
+                  ) : action.subject ? (
+                    <div className="truncate text-xs text-muted-foreground">{action.subject}</div>
+                  ) : null}
+                </div>
+                <span className={statusBadge(action.status)}>{action.status}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="rounded-xl border p-5">
         <h2 className="mb-4 text-sm font-medium text-muted-foreground">Sales Manager</h2>
         {manager ? (
           <div className="flex flex-col gap-4">
@@ -259,6 +301,20 @@ export default async function Home() {
       </dl>
     </main>
   );
+}
+
+function leadLabel(lead: unknown): string {
+  const one = Array.isArray(lead) ? lead[0] : lead;
+  const record = one as { full_name?: string | null; company_name?: string | null } | null;
+  return record?.full_name ?? record?.company_name ?? 'Unknown lead';
+}
+
+function statusBadge(status: string): string {
+  const base = 'shrink-0 rounded-md px-2 py-0.5 font-mono text-xs ';
+  if (status === 'sent') return `${base}bg-primary text-primary-foreground`;
+  if (status === 'blocked' || status === 'failed') return `${base}bg-destructive/10 text-destructive`;
+  if (status === 'awaiting_approval') return `${base}border`;
+  return `${base}bg-secondary text-secondary-foreground`;
 }
 
 function StatTile({ label, value }: { label: string; value: string }) {
