@@ -40,7 +40,12 @@ export async function GET(request: Request) {
     });
 
     if (!run.ok || !run.data) {
-      handled.push({ leadId: lead.id, ok: false, error: run.error });
+      handled.push({
+        leadId: lead.id,
+        ok: false,
+        error: run.error,
+        failureKind: run.failure?.kind ?? 'unknown',
+      });
       continue;
     }
 

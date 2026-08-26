@@ -6,7 +6,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { runAgent } from '@/lib/cadence/runtime';
+import { runAgent, statusForFailure } from '@/lib/cadence/runtime';
 import { supabaseServer } from '@/lib/supabase/server';
 
 const bodySchema = z.object({ workspaceId: z.string().uuid() });
@@ -53,7 +53,10 @@ export async function POST(request: Request) {
       extra: { channelStats },
     });
     if (!run.ok || !run.data) {
-      return NextResponse.json({ error: run.error ?? 'Sales Manager run failed' }, { status: 502 });
+      return NextResponse.json(
+        { error: run.error ?? 'Sales Manager run failed', failure: run.failure ?? null },
+        { status: statusForFailure(run.failure) }
+      );
     }
 
     return NextResponse.json({ data: run.data });

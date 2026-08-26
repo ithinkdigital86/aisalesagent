@@ -2,9 +2,31 @@
 
 import { z } from 'zod';
 
-export const outputSchema = z.object({
-  sentiment: z.enum(['positive', 'neutral', 'negative', 'objection', 'unsubscribe', 'no_reply']),
-  next_action: z.enum([
+import { advisoryInt, advisoryString, essentialEnum } from '@/lib/anthropic/schema';
+
+/** Hard limits, stated in the prompt below so the model knows them. */
+export const LIMITS = {
+  reasoning: 400,
+  /** 90 days. Anything past this is a park, not a wait. */
+  waitHours: 2160,
+  /** Cadence default when the model gives us nothing usable. */
+  defaultWaitHours: 72,
+} as const;
+
+/**
+ * Every one of these routes a lead: the action taken, the channel used, and
+ * the stage written to the row. Guessing on any of them is worse than failing.
+ */
+export const essentialSchema = z.object({
+  sentiment: essentialEnum([
+    'positive',
+    'neutral',
+    'negative',
+    'objection',
+    'unsubscribe',
+    'no_reply',
+  ]),
+  next_action: essentialEnum([
     'send_next_step',
     'wait',
     'switch_channel',
@@ -14,13 +36,22 @@ export const outputSchema = z.object({
     'suppress',
     'park_for_nurture',
   ]),
-  next_channel: z.enum(['email', 'sms', 'voice', 'linkedin', 'instagram', 'none']),
-  wait_hours: z.number().int().min(0).max(2160),
-  new_stage: z.enum([
+  next_channel: essentialEnum(['email', 'sms', 'voice', 'linkedin', 'instagram', 'none']),
+  new_stage: essentialEnum([
     'contacted', 'engaged', 'meeting_booked', 'won', 'lost', 'parked', 'suppressed',
   ]),
-  reasoning: z.string().max(400),
 });
+
+/**
+ * wait_hours is advisory because a clamped wait is a scheduling detail, not a
+ * broken decision. Out of range values are pulled back into range.
+ */
+export const advisoryShape = {
+  wait_hours: advisoryInt(0, LIMITS.waitHours, LIMITS.defaultWaitHours),
+  reasoning: advisoryString(LIMITS.reasoning),
+};
+
+export const outputSchema = essentialSchema.extend(advisoryShape);
 
 export function buildPrompt(input: unknown) {
   const i = input as {
@@ -47,7 +78,17 @@ Cadence discipline:
 - Positive but not ready: park for nurture with a 30 to 90 day wait, and say in your reasoning what event should wake them up.
 
 Return only a JSON object with no prose and no markdown fences, matching:
-{"sentiment": ..., "next_action": ..., "next_channel": ..., "wait_hours": number, "new_stage": ..., "reasoning": string}`;
+{"sentiment": ..., "next_action": ..., "next_channel": ..., "wait_hours": number, "new_stage": ..., "reasoning": string}
+
+Hard limits:
+- sentiment: one of "positive", "neutral", "negative", "objection", "unsubscribe", "no_reply"
+- next_action: one of "send_next_step", "wait", "switch_channel", "escalate_to_human", "mark_won", "mark_lost", "suppress", "park_for_nurture"
+- next_channel: one of "email", "sms", "voice", "linkedin", "instagram", "none"
+- new_stage: one of "contacted", "engaged", "meeting_booked", "won", "lost", "parked", "suppressed"
+- wait_hours: a whole number from 0 to ${LIMITS.waitHours}, which is 90 days
+- reasoning: at most ${LIMITS.reasoning} characters
+
+Use exactly the values listed. Anything else is not a valid answer.`;
 
   const user = `Lead:
 ${JSON.stringify(i.lead ?? {}, null, 2)}

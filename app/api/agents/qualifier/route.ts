@@ -38,7 +38,12 @@ export async function POST(request: Request) {
     .limit(1)
     .single();
 
-  const results = [];
+  // Per-lead results. A failure carries the reason so the table can name it
+  // rather than quietly reporting a smaller success count.
+  const results: Array<
+    | { leadId: string; ok: false; error: string; failureKind: string }
+    | { leadId: string; ok: true; fit_score: number; reasoning: string; urgency: string; recommended_channel: string }
+  > = [];
 
   for (const leadId of leadIds) {
     const run = await runAgent<{
@@ -49,7 +54,12 @@ export async function POST(request: Request) {
     }>(db, { agent: 'qualifier', workspaceId, leadId, extra: { icp } });
 
     if (!run.ok || !run.data) {
-      results.push({ leadId, ok: false, error: run.error });
+      results.push({
+        leadId,
+        ok: false,
+        error: run.error ?? 'Qualifier run failed',
+        failureKind: run.failure?.kind ?? 'unknown',
+      });
       continue;
     }
 

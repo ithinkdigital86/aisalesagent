@@ -2,19 +2,50 @@
 
 import { z } from 'zod';
 
-export const outputSchema = z.object({
-  headline: z.string().max(200),
-  pipeline_health: z.enum(['healthy', 'thin', 'stalling', 'blocked']),
-  bottleneck: z.string().max(300),
-  actions: z.array(
-    z.object({
-      instruction: z.string(),
-      target_agent: z.string(),
-      priority: z.enum(['high', 'medium', 'low']),
-    })
-  ).max(5),
-  needs_human: z.array(z.string()).max(5),
+import {
+  advisoryEnum,
+  advisoryObjectArray,
+  advisoryString,
+  advisoryStringArray,
+  essentialEnum,
+  essentialString,
+} from '@/lib/anthropic/schema';
+
+/** Hard limits, stated in the prompt below so the model knows them. */
+export const LIMITS = {
+  headline: 200,
+  bottleneck: 300,
+  actions: 5,
+  instruction: 400,
+  targetAgent: 80,
+  needsHuman: 5,
+  needsHumanItem: 200,
+} as const;
+
+/** The two fields the dashboard card cannot render without. */
+export const essentialSchema = z.object({
+  headline: essentialString(LIMITS.headline),
+  pipeline_health: essentialEnum(['healthy', 'thin', 'stalling', 'blocked']),
 });
+
+/**
+ * The instruction list is read by a human before anything acts on it, so a
+ * malformed entry is dropped rather than failing the whole daily review.
+ */
+export const advisoryShape = {
+  bottleneck: advisoryString(LIMITS.bottleneck),
+  actions: advisoryObjectArray(
+    z.object({
+      instruction: advisoryString(LIMITS.instruction),
+      target_agent: advisoryString(LIMITS.targetAgent, 'unassigned'),
+      priority: advisoryEnum(['high', 'medium', 'low'], 'medium'),
+    }),
+    LIMITS.actions
+  ),
+  needs_human: advisoryStringArray(LIMITS.needsHuman, LIMITS.needsHumanItem),
+};
+
+export const outputSchema = essentialSchema.extend(advisoryShape);
 
 export function buildPrompt(input: unknown) {
   const i = input as {
@@ -39,7 +70,14 @@ What you must not do:
 needs_human is for things no agent should decide: pricing exceptions, contract questions, an angry reply, a lead who asked to speak to a person, or a compliance question.
 
 Return only a JSON object with no prose and no markdown fences, matching:
-{"headline": string, "pipeline_health": "healthy"|"thin"|"stalling"|"blocked", "bottleneck": string, "actions": [{"instruction": string, "target_agent": string, "priority": "high"|"medium"|"low"}], "needs_human": string[]}`;
+{"headline": string, "pipeline_health": "healthy"|"thin"|"stalling"|"blocked", "bottleneck": string, "actions": [{"instruction": string, "target_agent": string, "priority": "high"|"medium"|"low"}], "needs_human": string[]}
+
+Hard limits. Anything longer is cut off, so put the point first:
+- headline: at most ${LIMITS.headline} characters
+- pipeline_health: exactly one of the four values above
+- bottleneck: at most ${LIMITS.bottleneck} characters, the single biggest one
+- actions: at most ${LIMITS.actions} entries, each instruction at most ${LIMITS.instruction} characters
+- needs_human: at most ${LIMITS.needsHuman} entries, each at most ${LIMITS.needsHumanItem} characters`;
 
   const user = `Pipeline by stage:
 ${JSON.stringify(i.pipeline ?? {}, null, 2)}

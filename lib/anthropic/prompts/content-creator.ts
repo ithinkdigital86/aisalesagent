@@ -2,13 +2,56 @@
 
 import { z } from 'zod';
 
-export const outputSchema = z.object({
-  subject: z.string().max(80).optional(),
-  body: z.string(),
-    opening_line_rationale: z.string(),
-  personalisation_anchor: z.string(),
-  word_count: z.number().int(),
+import { advisoryInt, advisoryString } from '@/lib/anthropic/schema';
+
+/** Hard limits, stated in the prompt below so the model knows them. */
+export const LIMITS = {
+  subject: 120,
+  rationale: 500,
+  anchor: 200,
+} as const;
+
+/**
+ * The copy itself. If this is wrong the run is worthless, so it stays strict.
+ *
+ * subject is optional because only email uses one, but when it is present it
+ * is strict on length: a recipient sees it, so an overlong subject must be
+ * rewritten by the corrective retry rather than silently cut off mid-word.
+ * null and undefined both mean "no subject", which is how the non-email
+ * channels answer.
+ */
+export const essentialSchema = z.object({
+  body: z.string().trim().min(1),
+  subject: z
+    .string()
+    .trim()
+    .min(1)
+    .max(LIMITS.subject)
+    .nullish()
+    .transform((text) => text ?? undefined),
 });
+
+/**
+ * Metadata. It is logged and displayed but never sent, so an overlong
+ * rationale gets truncated rather than binning an Opus call.
+ */
+export const advisoryShape = {
+  opening_line_rationale: advisoryString(LIMITS.rationale),
+  personalisation_anchor: advisoryString(LIMITS.anchor, 'none'),
+  word_count: advisoryInt(0, 10_000, 0),
+};
+
+export const outputSchema = essentialSchema.extend(advisoryShape).transform((draft) => ({
+  ...draft,
+  // The model miscounts often and it is only ever a display value, so a
+  // missing or nonsense count is recomputed rather than rejected.
+  word_count: draft.word_count > 0 ? draft.word_count : countWords(draft.body),
+}));
+
+function countWords(body: string): number {
+  const words = body.trim().split(/\s+/).filter(Boolean);
+  return words.length;
+}
 
 const CHANNEL_RULES: Record<string, string> = {
   email: `Subject line: 4 to 7 words, lowercase, no colons, reads like a note from a colleague rather than a campaign. Never use the company name plus a benefit claim.
@@ -70,6 +113,16 @@ ${CHANNEL_RULES[channel] ?? CHANNEL_RULES.email}
 
 Return only a JSON object with no prose and no markdown fences:
 {"subject": string (omit for non-email), "body": string, "opening_line_rationale": string, "personalisation_anchor": string, "word_count": number}
+
+Hard limits.
+
+subject is checked and rejected if it breaks its limit, because the recipient reads it:
+- at most ${LIMITS.subject} characters, and the channel rules above are tighter still
+- omit the field entirely on any channel that has no subject line
+
+These are metadata. Anything longer is cut off, so lead with the part that matters:
+- opening_line_rationale: at most ${LIMITS.rationale} characters, one or two sentences, not an essay
+- personalisation_anchor: at most ${LIMITS.anchor} characters
 
 personalisation_anchor must be the specific verifiable fact your opening is built on. If nothing specific is available in the context, set it to "none" and write a message that is honest about being a cold approach rather than faking familiarity.`;
 

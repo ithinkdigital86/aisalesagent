@@ -22,7 +22,12 @@ export async function GET(request: Request) {
 
   const { data: workspaces } = await db.from('workspaces').select('id').limit(200);
 
-  const handled: Array<{ workspaceId: string; ok: boolean; error?: string }> = [];
+  const handled: Array<{
+    workspaceId: string;
+    ok: boolean;
+    error?: string;
+    failureKind?: string;
+  }> = [];
 
   for (const ws of workspaces ?? []) {
     try {
@@ -52,7 +57,12 @@ export async function GET(request: Request) {
         workspaceId: ws.id,
         extra: { channelStats },
       });
-      handled.push({ workspaceId: ws.id, ok: run.ok, error: run.error });
+      handled.push({
+        workspaceId: ws.id,
+        ok: run.ok,
+        error: run.error,
+        failureKind: run.failure?.kind,
+      });
     } catch (err) {
       handled.push({
         workspaceId: ws.id,

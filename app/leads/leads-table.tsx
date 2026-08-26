@@ -35,6 +35,23 @@ const MAX_QUALIFY = 50;
 // Drafting spends an Opus call per lead, so keep a batch small.
 const MAX_DRAFT = 10;
 
+/** One failed lead in a batch, kept so the run can say what went wrong. */
+type Failure = { leadId: string; label: string; reason: string };
+
+function describeLead(lead: Lead | undefined, leadId: string): string {
+  if (!lead) return leadId;
+  return lead.full_name ?? lead.company_name ?? leadId;
+}
+
+/** Pull a readable reason out of whatever the route returned. */
+function reasonFrom(payload: unknown, fallback: string): string {
+  if (typeof payload === 'object' && payload !== null) {
+    const error = (payload as { error?: unknown }).error;
+    if (typeof error === 'string' && error.trim() !== '') return error;
+  }
+  return fallback;
+}
+
 export function LeadsTable({
   workspaceId,
   leads,
@@ -51,8 +68,26 @@ export function LeadsTable({
   const [pending, setPending] = React.useState(false);
   const [drafting, setDrafting] = React.useState(false);
   const [draftingLinkedIn, setDraftingLinkedIn] = React.useState(false);
+  const [failures, setFailures] = React.useState<Failure[]>([]);
+  const [failedRun, setFailedRun] = React.useState<string | null>(null);
 
   const allSelected = leads.length > 0 && selected.size === leads.length;
+  const byId = React.useMemo(() => new Map(leads.map((lead) => [lead.id, lead])), [leads]);
+  const failedIds = React.useMemo(
+    () => new Set(failures.map((failure) => failure.leadId)),
+    [failures]
+  );
+
+  function report(run: string, found: Failure[], total: number, hint?: string) {
+    setFailures(found);
+    setFailedRun(found.length > 0 ? run : null);
+    const ok = total - found.length;
+    if (found.length === 0) {
+      toast.success(`${run}: ${ok} of ${total} succeeded.${hint ? ` ${hint}` : ''}`);
+    } else {
+      toast.error(`${run}: ${ok} of ${total} succeeded, ${found.length} failed. See the list below.`);
+    }
+  }
 
   function toggle(id: string) {
     setSelected((current) => {
@@ -96,12 +131,26 @@ export function LeadsTable({
       });
       const payload = await response.json();
       if (!response.ok) {
-        throw new Error(typeof payload.error === 'string' ? payload.error : 'Qualifier failed');
+        throw new Error(reasonFrom(payload, 'Qualifier failed'));
       }
 
-      const results: Array<{ ok: boolean }> = Array.isArray(payload.data) ? payload.data : [];
-      const ok = results.filter((result) => result.ok).length;
-      toast.success(`Qualified ${ok} of ${leadIds.length} selected.`);
+      // The route scores each lead independently, so a batch can be part
+      // successful. Name the ones that failed instead of reporting a count.
+      const results: Array<{ leadId: string; ok: boolean; error?: string }> = Array.isArray(
+        payload.data
+      )
+        ? payload.data
+        : [];
+
+      const found: Failure[] = results
+        .filter((result) => !result.ok)
+        .map((result) => ({
+          leadId: result.leadId,
+          label: describeLead(byId.get(result.leadId), result.leadId),
+          reason: result.error ?? 'no reason given',
+        }));
+
+      report('Qualifier', found, leadIds.length);
       setSelected(new Set());
       router.refresh();
     } catch (err) {
@@ -111,7 +160,17 @@ export function LeadsTable({
     }
   }
 
-  async function draftEmails() {
+  /**
+   * One request per lead, so one lead failing must not hide the rest. Each
+   * failure keeps the reason the route gave, which now names the offending
+   * field rather than saying the shape was unexpected.
+   */
+  async function draft(options: {
+    url: string;
+    run: string;
+    hint: string;
+    setBusy: (value: boolean) => void;
+  }) {
     const leadIds = [...selected];
     if (leadIds.length === 0) return;
     if (leadIds.length > MAX_DRAFT) {
@@ -119,59 +178,56 @@ export function LeadsTable({
       return;
     }
 
-    setDrafting(true);
-    let ok = 0;
+    options.setBusy(true);
+    const found: Failure[] = [];
     try {
       for (const leadId of leadIds) {
-        const response = await fetch('/api/agents/email-specialist', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspaceId, leadId }),
-        });
-        if (response.ok) ok += 1;
+        try {
+          const response = await fetch(options.url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspaceId, leadId }),
+          });
+          if (response.ok) continue;
+
+          const payload = await response.json().catch(() => null);
+          found.push({
+            leadId,
+            label: describeLead(byId.get(leadId), leadId),
+            reason: reasonFrom(payload, `request failed with ${response.status}`),
+          });
+        } catch (err) {
+          found.push({
+            leadId,
+            label: describeLead(byId.get(leadId), leadId),
+            reason: err instanceof Error ? err.message : 'network error',
+          });
+        }
       }
-      toast.success(
-        `Drafted ${ok} of ${leadIds.length}. Process the send queue from the dashboard to send.`
-      );
+
+      report(options.run, found, leadIds.length, options.hint);
       setSelected(new Set());
       router.refresh();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
-      setDrafting(false);
+      options.setBusy(false);
     }
   }
 
-  async function draftLinkedIn() {
-    const leadIds = [...selected];
-    if (leadIds.length === 0) return;
-    if (leadIds.length > MAX_DRAFT) {
-      toast.error(`Draft at most ${MAX_DRAFT} at once.`);
-      return;
-    }
+  const draftEmails = () =>
+    draft({
+      url: '/api/agents/email-specialist',
+      run: 'Email drafts',
+      hint: 'Process the send queue from the dashboard to send.',
+      setBusy: setDrafting,
+    });
 
-    setDraftingLinkedIn(true);
-    let ok = 0;
-    try {
-      for (const leadId of leadIds) {
-        const response = await fetch('/api/agents/linkedin-specialist', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workspaceId, leadId }),
-        });
-        if (response.ok) ok += 1;
-      }
-      toast.success(
-        `Drafted ${ok} of ${leadIds.length}. Review them in the approval queue.`
-      );
-      setSelected(new Set());
-      router.refresh();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Something went wrong');
-    } finally {
-      setDraftingLinkedIn(false);
-    }
-  }
+  const draftLinkedIn = () =>
+    draft({
+      url: '/api/agents/linkedin-specialist',
+      run: 'LinkedIn drafts',
+      hint: 'Review them in the approval queue.',
+      setBusy: setDraftingLinkedIn,
+    });
 
   const busy = pending || drafting || draftingLinkedIn;
 
@@ -226,6 +282,33 @@ export function LeadsTable({
         </div>
       </div>
 
+      {failures.length > 0 && (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="text-sm font-medium text-foreground">
+              {failedRun}: {failures.length} lead{failures.length === 1 ? '' : 's'} failed
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setFailures([]);
+                setFailedRun(null);
+              }}
+            >
+              Dismiss
+            </Button>
+          </div>
+          <ul className="mt-2 space-y-1.5">
+            {failures.map((failure) => (
+              <li key={failure.leadId} className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{failure.label}</span>: {failure.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {leads.length === 0 ? (
         <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
           No leads for this filter yet. Run{' '}
@@ -257,7 +340,12 @@ export function LeadsTable({
             </thead>
             <tbody className="divide-y">
               {leads.map((lead) => (
-                <tr key={lead.id} className="hover:bg-muted/30">
+                <tr
+                  key={lead.id}
+                  className={
+                    failedIds.has(lead.id) ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-muted/30'
+                  }
+                >
                   <td className="px-3 py-2">
                     <input
                       type="checkbox"

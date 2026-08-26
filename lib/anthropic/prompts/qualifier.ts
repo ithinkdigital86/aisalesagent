@@ -2,13 +2,37 @@
 
 import { z } from 'zod';
 
-export const outputSchema = z.object({
-  fit_score: z.number().int().min(0).max(100),
-  reasoning: z.string().max(600),
-  disqualifiers: z.array(z.string()),
-  recommended_channel: z.enum(['email', 'linkedin', 'voice', 'instagram', 'none']),
-  urgency: z.enum(['now', 'this_month', 'nurture', 'park']),
+import {
+  advisoryString,
+  advisoryStringArray,
+  essentialEnum,
+  essentialInt,
+} from '@/lib/anthropic/schema';
+
+/** Hard limits, stated in the prompt below so the model knows them. */
+export const LIMITS = {
+  reasoning: 600,
+  disqualifiers: 8,
+  disqualifier: 120,
+} as const;
+
+/**
+ * These three write straight to the lead row and decide whether we spend
+ * outreach on it. A wrong score or an unknown channel is a real failure.
+ */
+export const essentialSchema = z.object({
+  fit_score: essentialInt(0, 100),
+  recommended_channel: essentialEnum(['email', 'linkedin', 'voice', 'instagram', 'none']),
+  urgency: essentialEnum(['now', 'this_month', 'nurture', 'park']),
 });
+
+/** Shown to a human in the leads table. Truncation is fine, failure is not. */
+export const advisoryShape = {
+  reasoning: advisoryString(LIMITS.reasoning),
+  disqualifiers: advisoryStringArray(LIMITS.disqualifiers, LIMITS.disqualifier),
+};
+
+export const outputSchema = essentialSchema.extend(advisoryShape);
 
 export function buildPrompt(input: unknown) {
   const i = input as {
@@ -33,7 +57,13 @@ Hard disqualifiers, which force a score below 20 regardless of other factors: a 
 Be blunt in your reasoning. If the only positive is that the industry matches, say the lead is weak and explain why. Inflated scores waste real outreach budget.
 
 Return only a JSON object matching this shape, with no prose and no markdown fences:
-{"fit_score": number, "reasoning": string, "disqualifiers": string[], "recommended_channel": "email"|"linkedin"|"voice"|"instagram"|"none", "urgency": "now"|"this_month"|"nurture"|"park"}`;
+{"fit_score": number, "reasoning": string, "disqualifiers": string[], "recommended_channel": "email"|"linkedin"|"voice"|"instagram"|"none", "urgency": "now"|"this_month"|"nurture"|"park"}
+
+Hard limits. Anything longer is cut off, so put the verdict first:
+- fit_score: a whole number from 0 to 100
+- reasoning: at most ${LIMITS.reasoning} characters
+- disqualifiers: at most ${LIMITS.disqualifiers} items, each at most ${LIMITS.disqualifier} characters, empty array when there are none
+- recommended_channel and urgency: exactly one of the values listed above, nothing else`;
 
   const user = `Ideal customer profile:
 ${JSON.stringify(i.icp ?? {}, null, 2)}

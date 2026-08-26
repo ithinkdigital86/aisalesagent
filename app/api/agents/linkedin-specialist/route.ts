@@ -8,7 +8,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { runAgent } from '@/lib/cadence/runtime';
+import { runAgent, statusForFailure } from '@/lib/cadence/runtime';
 import { supabaseServer } from '@/lib/supabase/server';
 
 const bodySchema = z.object({
@@ -66,7 +66,10 @@ export async function POST(request: Request) {
       extra: { offer, sender, step_number: stepNumber },
     });
     if (!run.ok || !run.data) {
-      return NextResponse.json({ error: run.error ?? 'Draft generation failed' }, { status: 502 });
+      return NextResponse.json(
+        { error: run.error ?? 'Draft generation failed', failure: run.failure ?? null },
+        { status: statusForFailure(run.failure) }
+      );
     }
 
     const draft = run.data;
