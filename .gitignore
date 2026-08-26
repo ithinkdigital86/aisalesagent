@@ -3,3 +3,7 @@ node_modules
 # Build output
 .next
 tsconfig.tsbuildinfo
+
+# Secrets. Copy .env.local.example and fill it in locally.
+.env.local
+.env*.local
