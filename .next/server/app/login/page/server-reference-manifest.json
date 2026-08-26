@@ -1,0 +1,20 @@
+{
+  "node": {
+    "00941ad230654c7e944e75d94fba4fcbccd16f1b1e": {
+      "workers": {
+        "app/login/page": {
+          "moduleId": "[project]/.next-internal/server/app/login/page/actions.js { ACTIONS_MODULE0 => \"[project]/app/actions/auth.ts [app-rsc] (ecmascript)\" } [app-rsc] (server actions loader, ecmascript)",
+          "async": false,
+          "exportedName": "ensureWorkspace",
+          "filename": "app/actions/auth.ts"
+        }
+      },
+      "layer": {
+        "app/login/page": "action-browser"
+      },
+      "exportedName": "ensureWorkspace",
+      "filename": "app/actions/auth.ts"
+    }
+  },
+  "edge": {}
+}

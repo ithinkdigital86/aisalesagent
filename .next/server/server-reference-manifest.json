@@ -1,0 +1,43 @@
+{
+  "node": {
+    "00941ad230654c7e944e75d94fba4fcbccd16f1b1e": {
+      "workers": {
+        "app/login/page": {
+          "moduleId": "[project]/.next-internal/server/app/login/page/actions.js { ACTIONS_MODULE0 => \"[project]/app/actions/auth.ts [app-rsc] (ecmascript)\" } [app-rsc] (server actions loader, ecmascript)",
+          "async": false,
+          "exportedName": "ensureWorkspace",
+          "filename": "app/actions/auth.ts"
+        },
+        "app/page": {
+          "moduleId": "[project]/.next-internal/server/app/page/actions.js { ACTIONS_MODULE0 => \"[project]/app/actions/auth.ts [app-rsc] (ecmascript)\" } [app-rsc] (server actions loader, ecmascript)",
+          "async": false,
+          "exportedName": "ensureWorkspace",
+          "filename": "app/actions/auth.ts"
+        }
+      },
+      "layer": {
+        "app/login/page": "action-browser",
+        "app/page": "rsc"
+      },
+      "filename": "app/actions/auth.ts",
+      "exportedName": "ensureWorkspace"
+    },
+    "00e69c8f97efb65d8b739a9a479dac66c3b4ae840f": {
+      "workers": {
+        "app/page": {
+          "moduleId": "[project]/.next-internal/server/app/page/actions.js { ACTIONS_MODULE0 => \"[project]/app/actions/auth.ts [app-rsc] (ecmascript)\" } [app-rsc] (server actions loader, ecmascript)",
+          "async": false,
+          "exportedName": "signOut",
+          "filename": "app/actions/auth.ts"
+        }
+      },
+      "layer": {
+        "app/page": "action-browser"
+      },
+      "filename": "app/actions/auth.ts",
+      "exportedName": "signOut"
+    }
+  },
+  "edge": {},
+  "encryptionKey": "+wR5yB1R5T5RujLj94tLkmY/K+uOvTtH44gIh9loS4M="
+}
