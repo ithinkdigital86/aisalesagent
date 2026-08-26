@@ -30,6 +30,8 @@ type SalesManagerOutput = {
   bottleneck?: string;
   actions?: Array<{ instruction: string; target_agent: string; priority: string }>;
   needs_human?: string[];
+  /** Instructions addressed to an agent that does not exist. Never acted on. */
+  dropped_actions?: string[];
 };
 
 export default async function Home() {
@@ -274,6 +276,26 @@ export default async function Home() {
                   </li>
                 ))}
               </ul>
+            ) : null}
+            {manager.dropped_actions && manager.dropped_actions.length > 0 ? (
+              <div className="rounded-md border border-destructive/40 px-3 py-2 text-sm">
+                <span className="font-medium text-destructive">
+                  {manager.dropped_actions.length === 1
+                    ? '1 instruction was not assigned'
+                    : `${manager.dropped_actions.length} instructions were not assigned`}
+                  :{' '}
+                </span>
+                <span className="text-muted-foreground">
+                  addressed to an agent that does not exist, so it was not passed on.
+                </span>
+                <ul className="mt-1 flex flex-col gap-0.5">
+                  {manager.dropped_actions.map((item, index) => (
+                    <li key={index} className="font-mono text-xs text-muted-foreground">
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             ) : null}
             {manager.needs_human && manager.needs_human.length > 0 ? (
               <div className="text-sm">

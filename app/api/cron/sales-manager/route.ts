@@ -27,6 +27,8 @@ export async function GET(request: Request) {
     ok: boolean;
     error?: string;
     failureKind?: string;
+    /** Set when the review only parsed after dropping unusable instructions. */
+    salvaged?: string;
   }> = [];
 
   for (const ws of workspaces ?? []) {
@@ -62,6 +64,7 @@ export async function GET(request: Request) {
         ok: run.ok,
         error: run.error,
         failureKind: run.failure?.kind,
+        salvaged: run.salvage?.detail,
       });
     } catch (err) {
       handled.push({

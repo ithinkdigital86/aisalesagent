@@ -8,17 +8,11 @@ import * as qualifier from '@/lib/anthropic/prompts/qualifier';
 import * as contentCreator from '@/lib/anthropic/prompts/content-creator';
 import * as followUp from '@/lib/anthropic/prompts/follow-up';
 import * as salesManager from '@/lib/anthropic/prompts/sales-manager';
+import type { AgentSlug } from './roster';
 
-export type AgentSlug =
-  | 'sales_manager'
-  | 'qualifier'
-  | 'content_creator'
-  | 'follow_up'
-  | 'email_specialist'
-  | 'linkedin_specialist'
-  | 'instagram_specialist'
-  | 'voice_specialist'
-  | 'sourcing_scout';
+// The slug list lives in ./roster so prompt files can name the team without
+// importing this module, which imports them.
+export type { AgentSlug };
 
 /** What slice of the shared brain an agent is allowed to read. */
 export type ContextScope =
@@ -41,6 +35,13 @@ export interface AgentDefinition {
   writesChannels: Array<'email' | 'sms' | 'voice' | 'linkedin' | 'instagram'>;
   buildPrompt: (input: unknown) => { system: string; user: string };
   outputSchema: z.ZodTypeAny;
+  /**
+   * Optional second parse, tried only once the corrective retry is spent. It
+   * should accept the same output as outputSchema with the unusable parts
+   * dropped and accounted for, so a partial answer beats no answer. Leave it
+   * unset for agents whose output is worthless in part.
+   */
+  salvageSchema?: z.ZodTypeAny;
 }
 
 export const AGENTS: Record<AgentSlug, AgentDefinition> = {
@@ -87,6 +88,9 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
     writesChannels: [],
     buildPrompt: salesManager.buildPrompt,
     outputSchema: salesManager.outputSchema,
+    // A daily review is worth showing even if one instruction was addressed to
+    // an agent that does not exist.
+    salvageSchema: salesManager.salvageSchema,
   },
 
   // Channel specialists reuse the content creator's prompt with a channel

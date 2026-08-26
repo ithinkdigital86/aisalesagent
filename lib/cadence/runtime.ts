@@ -47,6 +47,12 @@ export interface RunResult<T = unknown> {
   error?: string;
   failure?: RunFailure;
   runId?: string;
+  /**
+   * Set when the answer only parsed after the unusable parts were dropped. The
+   * data is usable, but something the model produced is not in it, and the
+   * schema records what inside `data` so a human reading the output sees it.
+   */
+  salvage?: { detail: string; attempts: number };
 }
 
 /**
@@ -117,6 +123,8 @@ export async function runAgent<T = unknown>(
 
     const messages: Anthropic.MessageParam[] = [{ role: 'user', content: user }];
     let failure: RunFailure | undefined;
+    /** The last thing the model said, kept for the salvage parse below. */
+    let lastText = '';
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const started = Date.now();
@@ -132,6 +140,7 @@ export async function runAgent<T = unknown>(
         .filter((b): b is Anthropic.TextBlock => b.type === 'text')
         .map((b) => b.text)
         .join('\n');
+      lastText = text;
 
       const outcome = parseOutput(def.outputSchema, text);
 
@@ -174,6 +183,28 @@ export async function runAgent<T = unknown>(
         { role: 'assistant', content: text.trim() || '(empty response)' },
         { role: 'user', content: correctionFor(outcome) }
       );
+    }
+
+    // Every retry is spent. If the agent declared a salvage schema, parse once
+    // more with the unusable parts dropped: a review missing one instruction is
+    // worth more to the person waiting for it than a 422. No model call is made
+    // here, so the row logs zero tokens, and the failed attempts above are
+    // already on the record as the signal that the prompt needs work.
+    if (def.salvageSchema && lastText.trim() !== '') {
+      const salvaged = parseOutput(def.salvageSchema, lastText);
+      if (salvaged.ok) {
+        const detail = failure?.detail ?? 'no detail';
+        const attempts = failure?.attempts ?? MAX_ATTEMPTS;
+        const runId = await logRun(db, {
+          ...opts,
+          model: def.model,
+          started: Date.now(),
+          ok: true,
+          output: salvaged.data,
+          error: `salvaged after ${attempts} attempts: ${detail}`,
+        });
+        return { ok: true, data: salvaged.data as T, runId, salvage: { detail, attempts } };
+      }
     }
 
     return {

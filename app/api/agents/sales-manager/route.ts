@@ -59,7 +59,9 @@ export async function POST(request: Request) {
       );
     }
 
-    return NextResponse.json({ data: run.data });
+    // A salvaged run is a success with something missing from it. Say so, so a
+    // caller is not left comparing action counts to work out what happened.
+    return NextResponse.json({ data: run.data, salvage: run.salvage ?? null });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'unknown_error' },
