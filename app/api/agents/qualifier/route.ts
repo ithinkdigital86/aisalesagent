@@ -2,6 +2,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { supabaseServer } from '@/lib/supabase/server';
+import { loadActiveIcp } from '@/lib/cadence/icp';
 import { runAgent } from '@/lib/cadence/runtime';
 
 const bodySchema = z.object({
@@ -30,13 +31,18 @@ export async function POST(request: Request) {
     .single();
   if (!ws) return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });
 
-  const { data: icp } = await db
-    .from('icp_profiles')
-    .select('name, filters, trigger_types')
-    .eq('workspace_id', workspaceId)
-    .eq('active', true)
-    .limit(1)
-    .single();
+  // Scoring against no profile is what produced a wall of 15s and parked
+  // leads, so say so instead of spending a model call to learn nothing.
+  const icp = await loadActiveIcp(db, workspaceId);
+  if (!icp) {
+    return NextResponse.json(
+      {
+        error:
+          'No active ideal customer profile. Create one on the ICP page and set it active before qualifying leads.',
+      },
+      { status: 400 }
+    );
+  }
 
   // Per-lead results. A failure carries the reason so the table can name it
   // rather than quietly reporting a smaller success count.
@@ -72,6 +78,10 @@ export async function POST(request: Request) {
         fit_reasoning: reasoning,
         stage: urgency === 'park' ? 'parked' : 'qualified',
         next_action_at: nextActionFor(urgency),
+        // Record which profile the score was made against: a score is only
+        // meaningful next to the profile that produced it, and the active
+        // profile changes.
+        icp_profile_id: icp.id,
       })
       .eq('id', leadId)
       .eq('workspace_id', workspaceId);

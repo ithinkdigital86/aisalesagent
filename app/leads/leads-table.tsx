@@ -16,6 +16,10 @@ type Lead = {
   fit_score: number | null;
   fit_reasoning: string | null;
   email: string | null;
+  /** The profile the score was made against, null for an unscored lead. */
+  icp_name: string | null;
+  /** That profile is no longer the workspace's active one. */
+  icp_stale: boolean;
 };
 
 const STAGES = [
@@ -335,6 +339,7 @@ export function LeadsTable({
                 <th className="px-3 py-2 font-medium">Title</th>
                 <th className="px-3 py-2 font-medium">Stage</th>
                 <th className="px-3 py-2 font-medium">Fit</th>
+                <th className="px-3 py-2 font-medium">Scored against</th>
                 <th className="px-3 py-2 font-medium">Reasoning</th>
               </tr>
             </thead>
@@ -366,6 +371,27 @@ export function LeadsTable({
                     </span>
                   </td>
                   <td className="px-3 py-2 font-mono">{lead.fit_score ?? '-'}</td>
+                  <td className="px-3 py-2">
+                    {lead.icp_name ? (
+                      <span
+                        className="block max-w-[12rem] truncate text-xs text-muted-foreground"
+                        title={
+                          lead.icp_stale
+                            ? `${lead.icp_name}, which is no longer the active profile`
+                            : lead.icp_name
+                        }
+                      >
+                        {lead.icp_name}
+                        {lead.icp_stale ? (
+                          <span className="ml-1 font-mono text-[10px] uppercase text-destructive">
+                            old
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">-</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-muted-foreground">
                     <div className="max-w-[24rem] truncate" title={lead.fit_reasoning ?? ''}>
                       {lead.fit_reasoning ?? '-'}

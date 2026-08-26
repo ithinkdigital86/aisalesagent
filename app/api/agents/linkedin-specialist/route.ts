@@ -8,6 +8,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
+import { loadActiveIcp } from '@/lib/cadence/icp';
 import { runAgent, statusForFailure } from '@/lib/cadence/runtime';
 import { supabaseServer } from '@/lib/supabase/server';
 
@@ -59,11 +60,15 @@ export async function POST(request: Request) {
       .single();
     if (!lead) return NextResponse.json({ error: 'Lead not found' }, { status: 404 });
 
+    // Same as the email route: the profile supplies the standing offer, and a
+    // workspace without one still gets a draft, just a more generic one.
+    const icp = await loadActiveIcp(db, workspaceId);
+
     const run = await runAgent<Draft>(db, {
       agent: 'linkedin_specialist',
       workspaceId,
       leadId,
-      extra: { offer, sender, step_number: stepNumber },
+      extra: { offer, sender, step_number: stepNumber, icp },
     });
     if (!run.ok || !run.data) {
       return NextResponse.json(

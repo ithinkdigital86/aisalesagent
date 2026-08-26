@@ -48,10 +48,22 @@ export async function POST(request: Request) {
       .single();
     if (!ws) return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });
 
+    // A search is not a decision about who the team sells to: the profile it
+    // creates stays inactive, and the ICP page is where one is made active.
+    // The exception is a workspace with no active profile at all, where
+    // leaving this one inactive would just leave the Qualifier with nothing.
+    const { data: activeIcp } = await db
+      .from('icp_profiles')
+      .select('id')
+      .eq('workspace_id', workspaceId)
+      .eq('active', true)
+      .limit(1)
+      .maybeSingle();
+
     // Create the ICP profile under the caller's RLS client so ownership holds.
     const { data: icp, error: icpErr } = await db
       .from('icp_profiles')
-      .insert({ workspace_id: workspaceId, name, filters, trigger_types })
+      .insert({ workspace_id: workspaceId, name, filters, trigger_types, active: !activeIcp })
       .select('id')
       .single();
     if (icpErr || !icp) {

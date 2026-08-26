@@ -3,6 +3,7 @@
 import { z } from 'zod';
 
 import { advisoryInt, advisoryString } from '@/lib/anthropic/schema';
+import { describeIcp, type ActiveIcp } from '@/lib/cadence/icp';
 
 /** Hard limits, stated in the prompt below so the model knows them. */
 export const LIMITS = {
@@ -83,7 +84,13 @@ export function buildPrompt(input: unknown) {
     offer?: string;
     sender?: string;
     step_number?: number;
+    icp?: ActiveIcp | null;
   };
+
+  // A per-request offer wins, because a one-off campaign is allowed to pitch
+  // something other than the standing offer. Otherwise the active profile's
+  // offer description is what we sell.
+  const offer = i.offer?.trim() || i.icp?.offer?.trim() || 'not specified';
 
   const channel = i.channel ?? 'email';
 
@@ -136,7 +143,10 @@ personalisation_anchor must be the specific verifiable fact your opening is buil
     .join('\n\n');
 
   const user = `Who we are and what we offer:
-${i.offer ?? 'not specified'}
+${offer}
+
+Who we sell to. The recipient below was scored against this profile, so write as though it is who you expect them to be, and do not pitch outside it:
+${describeIcp(i.icp)}
 
 Sending as: ${i.sender ?? 'not specified'}
 

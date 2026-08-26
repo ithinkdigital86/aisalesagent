@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
+import { loadActiveIcp } from '@/lib/cadence/icp';
 import { supabaseServer } from '@/lib/supabase/server';
 import { LeadsTable } from './leads-table';
 
@@ -46,12 +47,36 @@ export default async function LeadsPage({
 
   let query = db
     .from('leads')
-    .select('id, full_name, company_name, title, stage, fit_score, fit_reasoning, email')
+    .select(
+      'id, full_name, company_name, title, stage, fit_score, fit_reasoning, email, icp_profile_id, icp:icp_profiles(name, active)'
+    )
     .eq('workspace_id', workspace.id);
   if (stage !== 'all') query = query.eq('stage', stage);
   const { data: leads } = await query
     .order('fit_score', { ascending: sort === 'fit_asc', nullsFirst: false })
     .limit(100);
+
+  const activeIcp = await loadActiveIcp(db, workspace.id);
+
+  // The join comes back as an object or a one-element array depending on how
+  // PostgREST resolves the relationship, so flatten it once here rather than in
+  // the table.
+  const rows = (leads ?? []).map((lead) => {
+    const joined = Array.isArray(lead.icp) ? lead.icp[0] : lead.icp;
+    return {
+      id: lead.id,
+      full_name: lead.full_name,
+      company_name: lead.company_name,
+      title: lead.title,
+      stage: lead.stage as string,
+      fit_score: lead.fit_score,
+      fit_reasoning: lead.fit_reasoning,
+      email: lead.email,
+      icp_name: joined?.name ?? null,
+      /** A score made against a profile that is no longer the active one. */
+      icp_stale: joined ? joined.active !== true : false,
+    };
+  });
 
   return (
     <main className="mx-auto flex min-h-svh max-w-5xl flex-col gap-8 px-6 py-16">
@@ -74,7 +99,27 @@ export default async function LeadsPage({
         </p>
       </div>
 
-      <LeadsTable workspaceId={workspace.id} leads={leads ?? []} stage={stage} sort={sort} />
+      {activeIcp ? (
+        <div className="rounded-lg border px-4 py-3 text-sm">
+          <span className="font-medium text-foreground">Scoring against: </span>
+          <span className="text-muted-foreground">{activeIcp.name}</span>
+          <Link href="/icp" className="ml-2 text-muted-foreground underline underline-offset-4">
+            Change
+          </Link>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm">
+          <span className="font-medium text-foreground">No active ideal customer profile. </span>
+          <span className="text-muted-foreground">
+            The Qualifier has nothing to score against and will refuse to run.{' '}
+          </span>
+          <Link href="/icp" className="text-foreground underline underline-offset-4">
+            Create one
+          </Link>
+        </div>
+      )}
+
+      <LeadsTable workspaceId={workspace.id} leads={rows} stage={stage} sort={sort} />
     </main>
   );
 }

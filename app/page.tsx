@@ -131,6 +131,7 @@ export default async function Home() {
 
       <nav className="flex flex-wrap gap-3">
         {[
+          { href: '/icp', label: 'ICP' },
           { href: '/sourcing', label: 'Sourcing' },
           { href: '/leads', label: 'Leads' },
           { href: '/approvals', label: `Approvals${awaiting ? ` (${awaiting})` : ''}` },

@@ -316,6 +316,7 @@ export type Database = {
           filters: Json;
           id: string;
           name: string;
+          offer: string | null;
           trigger_types: string[];
           updated_at: string;
           workspace_id: string;
@@ -326,6 +327,7 @@ export type Database = {
           filters?: Json;
           id?: string;
           name: string;
+          offer?: string | null;
           trigger_types?: string[];
           updated_at?: string;
           workspace_id: string;
@@ -336,6 +338,7 @@ export type Database = {
           filters?: Json;
           id?: string;
           name?: string;
+          offer?: string | null;
           trigger_types?: string[];
           updated_at?: string;
           workspace_id?: string;
