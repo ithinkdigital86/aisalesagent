@@ -90,8 +90,10 @@ function unsubscribeUrl(workspaceId: string, email: string): string {
   )}`;
 }
 
+// The List-Unsubscribe header is the primary control; this is the fallback for
+// clients that do not render one, so it stays to a single short line.
 function withUnsubscribe(body: string, url: string): string {
-  return `${body}\n\nTo stop receiving these emails, unsubscribe here: ${url}`;
+  return `${body}\n\nUnsubscribe: ${url}`;
 }
 
 /** The single place the network call to Resend happens. */
@@ -112,7 +114,15 @@ async function postToResend(params: {
       to: [params.to],
       subject: params.subject,
       text: params.text,
-      headers: { 'List-Unsubscribe': `<${params.listUnsubscribe}>` },
+      // RFC 8058 one-click. The header pair is what makes Gmail and Outlook
+      // render a native unsubscribe control; List-Unsubscribe-Post promises
+      // the URL answers a POST without a confirmation step, which the
+      // unsubscribe route does. Both headers go on every outbound email,
+      // because this is the only place a send happens.
+      headers: {
+        'List-Unsubscribe': `<${params.listUnsubscribe}>`,
+        'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+      },
     }),
   });
 

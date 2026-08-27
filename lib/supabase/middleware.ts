@@ -9,7 +9,13 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
 // Prefixes an unauthenticated visitor is allowed to reach.
-const PUBLIC_PREFIXES = ['/login', '/auth'];
+//
+// /api/unsubscribe is public by necessity: the recipient of an outbound email
+// has no session, so guarding it would redirect every unsubscribe click to the
+// login page and silently break the one-click control mail clients render from
+// the List-Unsubscribe headers. It authenticates the caller itself, with the
+// HMAC-signed token in the query string, and does nothing without a valid one.
+const PUBLIC_PREFIXES = ['/login', '/auth', '/api/unsubscribe'];
 
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });

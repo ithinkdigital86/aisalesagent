@@ -10,6 +10,12 @@ export const LIMITS = {
   subject: 120,
   rationale: 500,
   anchor: 200,
+  /** First-touch email body target, interpolated into the email channel rules. */
+  emailWordsMin: 60,
+  emailWordsMax: 90,
+  /** Email subject line target, in words. */
+  subjectWordsMin: 3,
+  subjectWordsMax: 6,
 } as const;
 
 /**
@@ -55,8 +61,14 @@ function countWords(body: string): number {
 }
 
 const CHANNEL_RULES: Record<string, string> = {
-  email: `Subject line: 4 to 7 words, lowercase, no colons, reads like a note from a colleague rather than a campaign. Never use the company name plus a benefit claim.
-Body: 90 to 130 words. One idea. One question at the end. No bullet lists. No signature block, that gets appended later.
+  email: `Subject line: ${LIMITS.subjectWordsMin} to ${LIMITS.subjectWordsMax} words, lowercase, no colons, no title case, reads like a note from a colleague rather than a campaign.
+It must be specific to this company, this person's role, or the trigger you are writing about, specific enough that it could not be pasted onto any other prospect. Name the thing. A subject naming their new office, their hiring push, or the job they actually do beats one naming a category.
+Write it to be opened, not to summarise the email. It is a reason to look, not an abstract of what is inside, and it must not simply restate your first line.
+No generic openers: not "quick question", not "idea for you", not "following up", not your company name paired with a benefit claim.
+Body: ${LIMITS.emailWordsMin} to ${LIMITS.emailWordsMax} words. This is a ceiling, not a target to fill, and it is counted.
+One idea and one question. Nothing else. No second paragraph of setup, no scene-setting preamble, no restating the offer, no bullet lists, no signature block, that gets appended later.
+Cut every sentence that is not the observation, the idea, or the question.
+That range is for a first touch. On any later step in the sequence go shorter still, under ${LIMITS.emailWordsMin} words, and refer back to the previous message in a clause rather than recapping it.
 An unsubscribe line is appended automatically, so do not write one.`,
 
   linkedin: `Under 300 characters, because the connection-request note is capped and long DMs go unread.
@@ -102,8 +114,10 @@ How you open:
 - Diagnose before you offer. Name what you think is going wrong before you mention what you do.
 
 How you prove:
-- Frame proof as recollection, not assertion. "Recently I worked with a plumbing firm in Sydney sitting on the same problem" beats "we have extensive experience".
-- Use context, then action, then result, with a real number attached. If you have no real number available in the context given to you, use no number at all. Never invent a statistic, a client name, or a percentage.
+- Social proof may only come from the context you were given. If a client, a result, a number, a logo, or a mutual connection does not appear there, you do not have it and you may not use it.
+- Never invent one. Not a named client, not an unnamed one, not a case study, not a statistic, not a percentage, not a shared contact, not "a firm like yours I worked with recently". A hypothetical written in the past tense is still a fabrication, and it is worse than sending nothing.
+- When you do have real proof in the context, frame it as recollection rather than assertion: context, then action, then result, with the real number attached.
+- When you have none, do not reach for a substitute. Write an honest hypothesis about their situation instead, and mark it as one. Say what you think is happening at their company, say what led you to think it, and invite them to correct you. A specific guess that is wrong still earns a reply. An invented credential ends the conversation the moment it is checked.
 
 How you close:
 - One question. It should be easy to answer and should lead toward a conversation, not a purchase.
@@ -131,7 +145,7 @@ These are metadata. Anything longer is cut off, so lead with the part that matte
 - opening_line_rationale: at most ${LIMITS.rationale} characters, one or two sentences, not an essay
 - personalisation_anchor: at most ${LIMITS.anchor} characters
 
-personalisation_anchor must be the specific verifiable fact your opening is built on. If nothing specific is available in the context, set it to "none" and write a message that is honest about being a cold approach rather than faking familiarity.`;
+personalisation_anchor must be the specific verifiable fact your opening is built on, quoted or paraphrased from the context you were given and nowhere else. If nothing specific is available in the context, set it to "none" and write a message that is honest about being a cold approach: an explicit hypothesis about their situation, not faked familiarity and not borrowed proof.`;
 
   const priorMessages = (i.history ?? [])
     .map(
