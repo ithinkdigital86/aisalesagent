@@ -15,7 +15,13 @@ import { NextResponse, type NextRequest } from 'next/server';
 // login page and silently break the one-click control mail clients render from
 // the List-Unsubscribe headers. It authenticates the caller itself, with the
 // HMAC-signed token in the query string, and does nothing without a valid one.
-const PUBLIC_PREFIXES = ['/login', '/auth', '/api/unsubscribe'];
+//
+// /api/webhooks/resend is public for the same reason: Resend posts delivery,
+// bounce, complaint and inbound-reply events with no session, so guarding it
+// would redirect every event to /login and the reply columns would stay empty.
+// It authenticates the caller itself, by verifying the Svix signature over the
+// raw request body against RESEND_WEBHOOK_SECRET before it reads the database.
+const PUBLIC_PREFIXES = ['/login', '/auth', '/api/unsubscribe', '/api/webhooks/resend'];
 
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
