@@ -10,6 +10,9 @@
     "module": "esnext",
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
+    // lib/**/*.test.ts is run straight by node --test, which needs the real
+    // extension on the specifier. Safe alongside noEmit: nothing is emitted.
+    "allowImportingTsExtensions": true,
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,

@@ -27,6 +27,7 @@ import crypto from 'node:crypto';
 
 import { NextResponse } from 'next/server';
 
+import { classifyReply, splitQuotedReply } from '@/lib/cadence/reply';
 import { supabaseService } from '@/lib/supabase/server';
 
 /** Svix's own default. Older than this and the signature is stale, not valid. */
@@ -178,63 +179,6 @@ function htmlToText(html: string): string {
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
-}
-
-/**
- * Best-effort removal of the quoted original beneath a reply. The Content
- * Creator feeds reply_body straight into a prompt, so leaving our own outbound
- * copy quoted underneath teaches it to imitate itself. Cuts at the earliest
- * recognised separator, and keeps the whole message if that would empty it.
- */
-const QUOTE_MARKERS: RegExp[] = [
-  /^\s*-{2,}\s*Original Message\s*-{2,}/im,
-  /^\s*On\b.{0,300}\bwrote:\s*$/im,
-  /^\s*>+\s?/m,
-];
-
-function stripQuotedReply(text: string): string {
-  let cut = text.length;
-  for (const marker of QUOTE_MARKERS) {
-    const found = text.match(marker);
-    if (found?.index !== undefined && found.index < cut) cut = found.index;
-  }
-  const trimmed = text.slice(0, cut).trim();
-  return trimmed || text.trim();
-}
-
-// ---------------------------------------------------------------
-// Sentiment
-// ---------------------------------------------------------------
-
-export type ReplySentiment = 'positive' | 'neutral' | 'negative' | 'objection' | 'unsubscribe';
-
-/**
- * Opt-out language. Deliberately narrow: this is the one classification that
- * has a legal consequence attached, so it matches only phrases that cannot be
- * read another way. A bare "stop" is not here on purpose ("stop by next week").
- */
-const OPT_OUT = /\b(unsubscribe|opt[\s-]?out|remove me|take me off|stop (?:emailing|contacting|messaging)|(?:do not|don'?t|no longer) (?:email|contact|message)|no longer wish to (?:receive|hear))\b/i;
-
-const NEGATIVE = /\b(not interested|no thanks?|no thank you|not a (?:good )?fit|we'?re all set|not right now|no need|pass on this|please stop)\b/i;
-
-const OBJECTION = /\b(pricing|price|too expensive|cost|budget|contract|already (?:use|using|have)|competitor|we work with)\b/i;
-
-const POSITIVE = /\b(interested|sounds good|happy to|let'?s (?:talk|chat|connect)|book a|schedule a|set up a call|send (?:over|me) (?:a|the)|keen|tell me more|what times?)\b/i;
-
-/**
- * A cheap deterministic first pass, not the system's opinion of the reply.
- * The Follow-up manager re-reads the same text with full lead context and
- * produces the authoritative routing decision; this exists so the column is
- * populated the moment the reply lands, and so an opt-out suppresses without
- * waiting for the next cron tick. Order matters: "not interested" contains
- * "interested", so negative is tested before positive.
- */
-export function classifyReply(text: string): ReplySentiment {
-  if (OPT_OUT.test(text)) return 'unsubscribe';
-  if (NEGATIVE.test(text)) return 'negative';
-  if (OBJECTION.test(text)) return 'objection';
-  if (POSITIVE.test(text)) return 'positive';
-  return 'neutral';
 }
 
 /**
@@ -424,7 +368,13 @@ async function handleReceived(db: Db, event: ResendEvent): Promise<Handled> {
   if (!action) return { matched: false, reason: 'no_matching_action' };
 
   const raw = email.text?.trim() || (email.html ? htmlToText(email.html) : '');
-  const body = stripQuotedReply(raw).slice(0, MAX_REPLY_CHARS);
+
+  // The quoted original is dropped before anything reads the reply. Both the
+  // stored body and the sentiment come off the same stripped half, so our own
+  // outbound copy — unsubscribe footer included — cannot be classified as
+  // though the recipient had written it.
+  const { reply } = splitQuotedReply(raw);
+  const body = reply.slice(0, MAX_REPLY_CHARS);
   const sentiment = classifyReply(body);
 
   // The guard is the idempotency: a redelivered event, or a later message in
