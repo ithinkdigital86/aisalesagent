@@ -79,12 +79,20 @@ function countWords(body: string): number {
 // this quarter recognises them faster than they read the sentence, and one of
 // them in the first line costs the reply regardless of how good the rest is.
 
-/** Openers that mark a message as machine-written before the second line. */
+/**
+ * Openers that mark a message as machine-written before the second line.
+ *
+ * The last one was the first line of the primary worked example. Told not to
+ * reuse it, the model reused it in every draft, so it is banned outright and
+ * the example now opens another way. Nothing shown as the target may model a
+ * line the detector rejects.
+ */
 export const BANNED_OPENERS = [
   'I hope this email finds you well',
   'I wanted to reach out',
   'I came across your',
   'quick question',
+  'This is a cold email',
 ] as const;
 
 /** Vocabulary and connective tissue that reads as generated prose. */
@@ -434,7 +442,7 @@ export const WORKED_EXAMPLES = [
     step: 1,
     note: 'First touch with nothing specific to anchor on, so personalisation_anchor is "none". It names the guess as a guess once, then describes their week as if it could see it, and never says what the guess rests on.',
     body:
-      "This is a cold email, so I'll be direct about the guess I'm making. At a 120 person software company, the marketing team is usually spread across brand and content, and outbound ends up as someone's third priority. Someone books a call and it lands in the CRM with no context. Sales quietly stops trusting marketing's leads. Who owns outbound end to end on your side?",
+      "We haven't spoken, so I'll be direct about the guess I'm making. At a 120 person software company, the marketing team is usually spread across brand and content, and outbound ends up as someone's third priority. Someone books a call and it lands in the CRM with no context. Sales quietly stops trusting marketing's leads. Who owns outbound end to end on your side?",
   },
   {
     step: 1,
@@ -455,7 +463,7 @@ function workedExamples(): string {
   const shown = WORKED_EXAMPLES.map(
     (example, n) => `Example ${n + 1}. ${example.note}\n"${example.body}"`
   ).join('\n\n');
-  return `What the target reads like. The finished emails below are each clean on every rule above. Read them for the voice: one person saying what they think is going on at another person's company, in plain words, with nothing for sale. Then put them down. They are examples, not templates. Do not reuse their openings, their sentence shapes or their phrasing, and do not write "This is a cold email" because the first one does. What your message says comes from the lead in front of you and nowhere else; these only show what a finished one sounds like. On a channel other than email, keep the voice and follow that channel's length.
+  return `What the target reads like. The finished emails below are each clean on every rule above. Read them for the voice: one person saying what they think is going on at another person's company, in plain words, with nothing for sale. Then put them down. They are examples, not templates. Do not reuse their openings, their sentence shapes or their phrasing, and do not lift the first sentence of any of them: an opener that shows up in more than one draft is a template, whatever it says. What your message says comes from the lead in front of you and nowhere else; these only show what a finished one sounds like. On a channel other than email, keep the voice and follow that channel's length.
 
 ${shown}`;
 }

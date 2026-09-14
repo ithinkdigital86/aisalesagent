@@ -216,7 +216,7 @@ test('the constraints that predate the anti-tell rules are still there', () => {
 
 test('the primary example is the draft the team picked, and it leads', () => {
   const [primary] = WORKED_EXAMPLES;
-  assert.ok(primary.body.startsWith('This is a cold email, so'));
+  assert.ok(primary.body.startsWith("We haven't spoken, so I'll be direct about the guess I'm making."));
   assert.ok(primary.body.endsWith('Who owns outbound end to end on your side?'));
   assert.ok(primary.body.includes("Sales quietly stops trusting marketing's leads."));
 });
@@ -234,7 +234,19 @@ test('the examples are marked as examples, not templates, and not to be lifted',
   const system = systemPrompt();
   assert.match(system, /They are examples, not templates/);
   assert.match(system, /Do not reuse their openings/);
-  assert.ok(system.includes('do not write "This is a cold email" because the first one does'));
+  assert.match(system, /do not lift the first sentence of any of them/);
+});
+
+test('the opener the model kept copying is banned, and no example models it', () => {
+  assert.ok(BANNED_OPENERS.includes('This is a cold email'));
+  for (const [n, example] of WORKED_EXAMPLES.entries()) {
+    assert.ok(!example.body.includes('This is a cold email'), `example ${n + 1} still opens on it`);
+  }
+  // The examples section quotes no banned line either; the only place the
+  // string appears is the banned list itself.
+  const system = systemPrompt();
+  const examples = system.slice(system.indexOf('What the target reads like'));
+  assert.ok(!examples.includes('This is a cold email'));
 });
 
 test('every worked example is clean on every counted rule', () => {
