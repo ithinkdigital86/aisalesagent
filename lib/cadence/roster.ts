@@ -18,6 +18,9 @@ export const AGENT_SLUGS = [
   'instagram_specialist',
   'voice_specialist',
   'sourcing_scout',
+  'icp_strategist',
+  'website_reader',
+  'profile_guesser',
 ] as const;
 
 export type AgentSlug = (typeof AGENT_SLUGS)[number];
@@ -36,6 +39,12 @@ export const AGENT_RESPONSIBILITIES: Record<AgentSlug, string> = {
   instagram_specialist: 'writes and sends Instagram DMs',
   voice_specialist: 'writes call scripts and places calls',
   sourcing_scout: 'finds new leads and the triggers that make them worth contacting',
+  icp_strategist:
+    'proposes ideal customer profiles from the business profile for a human to choose between; runs on request, never a target',
+  website_reader:
+    'reads a company website and drafts business profile entries from what it says, for the owner to accept field by field; runs on request, never a target',
+  profile_guesser:
+    'when the website cannot be read, guesses business profile entries from the company name and domain, each accepted by hand and marked unverified; runs on request, never a target',
 };
 
 /** The roster as prompt text: one `- slug: responsibility` line per agent. */

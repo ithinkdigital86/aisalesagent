@@ -250,3 +250,62 @@ for Instagram. Both are long lead times and should be started early.
 tier pauses after ~7 days of inactivity and will need a paid plan before
 production; the learning loop needs roughly 200 sent messages before it has
 anything to learn from.
+
+---
+
+## 8. Session log
+
+Later work, one entry per session, newest last. Sections 1 to 7 describe the
+system as it stood after the handover; these describe what changed since.
+
+### 2026-09-14 Business profile autofill, second tier
+
+**Problem.** The business profile form could be drafted from the company's
+website, with every entry quote-checked against the page text. For a site
+drawn by JavaScript the reader gets a shell with no text, returns `no_text`,
+and the owner is left with an empty form. The same for a host that does not
+answer.
+
+**Change.** When the read fails with `no_text` or `unreachable`, the failure
+panel offers a clearly separate action: *Suggest from the company name and
+domain instead*. It is worded as a guess because it is one. A new agent,
+`profile_guesser`, proposes the same fields from the company name, the
+domain, and whatever one more look at the homepage recovers (title and meta
+description, which a JS shell usually still carries in its head; fetched
+server-side rather than replayed from the client). There is no quote to
+check, so the reader's evidence rule does not apply, and what replaces it is
+procedural:
+
+- nothing from this path fills a field on its own; each guess has its own
+  Accept button and shows the model's one-line reason for it;
+- every field that takes a guess is marked `inferred`, shown as an amber
+  *unverified guess* badge, and saved as such;
+- the panel says in as many words that these are guesses from the name, not
+  from the site, and asks the owner to correct them.
+
+**Origins.** `business_profiles.field_origins` (migration 0007) records where
+each draftable field's text came from: `manual`, `from_website` or
+`inferred`. One jsonb map rather than seven columns, validated by a SQL
+function so a bad key or value is refused at the row. A field with a guess in
+it stays `inferred` even if a checked suggestion is added on top, because the
+guess is still there; emptying the field clears it. Only `inferred` counts as
+unverified: `from_website` was checked against a quote.
+
+**Consumers.** The point of the origin is that a profile built on guesses
+must not read as one built on research. `describeBusinessProfile()` tags a
+guessed field on its own line (`Industries served [UNVERIFIED GUESS: …]:
+Logistics`), the ICP strategist's prompt lists the unverified fields and is
+told to treat them as hypotheses and call a recommendation resting on one
+provisional, and the ICP page shows an amber notice naming them before a run
+is spent. The generation snapshot carries the map with it.
+
+**Decisions worth knowing.** The guess button is offered only for the two
+failure kinds the brief named; `timeout` and `http_error` (a 403 from bot
+protection is common) are one line away in `GUESSABLE_FAILURES` if wanted.
+The guesser runs Opus at low effort with the reader's token cap, unmeasured
+so far. Pricing model is not guessed; it stays manual.
+
+**Verification.** `tsc`, `npm test` (170 passing, 13 new across four files)
+and `npm run build`. Not yet clicked through against a live JS-only site;
+that is the next thing to do, and the migration has to be run in Supabase
+first.

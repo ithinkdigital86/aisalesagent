@@ -15,6 +15,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { z } from 'zod';
 import type { Database, Json, Tables } from '@/types/database';
 import { describeIssues } from '@/lib/anthropic/schema';
+import { loadBusinessProfile, type BusinessProfile } from './business-profile';
 import {
   AGENTS,
   type AgentDefinition,
@@ -124,6 +125,8 @@ export interface AgentContext {
     'agent' | 'memory_type' | 'content' | 'success_rate' | 'sample_size' | 'confidence'
   >[];
   pipeline?: { byStage: Record<string, number>; total: number };
+  /** The owner's description of their own business. Null when not written yet. */
+  businessProfile?: BusinessProfile | null;
 }
 
 export async function runAgent<T = unknown>(
@@ -141,7 +144,11 @@ export async function runAgent<T = unknown>(
 
   try {
     const context = await loadContext(db, def.reads, opts);
-    const { system, user } = def.buildPrompt({ ...context, ...opts.extra });
+    // The same input goes to the prompt and to the review, so a rule that
+    // needs the lead record (no company name in the subject) reads it from
+    // where the prompt read it.
+    const input = { ...context, ...opts.extra };
+    const { system, user } = def.buildPrompt(input);
 
     const messages: ChatMessage[] = [{ role: 'user', content: user }];
     let failure: RunFailure | undefined;
@@ -166,7 +173,7 @@ export async function runAgent<T = unknown>(
         // The schema says the shape is right. The review, where the agent
         // declares one, says whether the copy is. undefined here means "not
         // reviewed", which is logged as such rather than as zero tells.
-        const tells = def.reviewOutput?.(outcome.data);
+        const tells = def.reviewOutput?.(outcome.data, input);
 
         if (!tells || tells.length === 0 || attempt === MAX_ATTEMPTS) {
           const runId = await logRun(db, {
@@ -262,7 +269,7 @@ export async function runAgent<T = unknown>(
         const detail = failure?.detail ?? 'no detail';
         const attempts = failure?.attempts ?? MAX_ATTEMPTS;
         // No retry is left to spend on these, but they are still recorded.
-        const tells = def.reviewOutput?.(salvaged.data);
+        const tells = def.reviewOutput?.(salvaged.data, input);
         const runId = await logRun(db, {
           ...opts,
           model: def.model,
@@ -290,7 +297,9 @@ export async function runAgent<T = unknown>(
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown_error';
     const kind: RunFailureKind =
-      err instanceof Anthropic.APIError || err instanceof OpenAiApiError ? 'api_error' : 'unknown';
+      err instanceof Anthropic.APIError || err instanceof OpenAiApiError || err instanceof TokenCapError
+        ? 'api_error'
+        : 'unknown';
     await logRun(db, {
       ...opts,
       model: def.model,
@@ -346,6 +355,14 @@ interface ModelReply {
  * runAgent can classify an OpenAI failure as api_error the same way it
  * classifies Anthropic.APIError, rather than logging it as unknown.
  */
+/** The answer was cut off at the agent's maxTokens. A registry problem, not a sampling one. */
+export class TokenCapError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TokenCapError';
+  }
+}
+
 export class OpenAiApiError extends Error {
   readonly status?: number;
 
@@ -368,26 +385,44 @@ async function callModel(
   if (def.provider === 'openai') {
     return callOpenAi(def.model, def.maxTokens, system, messages);
   }
-  return callAnthropic(def.model, def.maxTokens, system, messages);
+  return callAnthropic(def.model, def.maxTokens, system, messages, def.effort);
 }
 
 async function callAnthropic(
   model: string,
   maxTokens: number,
   system: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  effort?: 'low' | 'medium' | 'high'
 ): Promise<ModelReply> {
   const response = await anthropic.messages.create({
     model,
     max_tokens: maxTokens,
     system,
     messages,
+    // Thinking stays on; effort is how much of it. Omitted when the agent
+    // does not set one, so the other agents run exactly as before.
+    ...(effort ? { output_config: { effort } } : {}),
   });
 
   const text = response.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
     .map((b) => b.text)
     .join('\n');
+
+  // Every agent answers in JSON, so an answer cut off at the cap is not a
+  // partial answer, it is none, and the corrective retry would only run the
+  // same prompt into the same cap. Thinking is billed against max_tokens,
+  // so this is also what "spent the budget thinking and returned nothing"
+  // looks like. Name the cap, so the fix (effort or maxTokens in the
+  // registry) is obvious from the run log rather than from a JSON error.
+  if (response.stop_reason === 'max_tokens') {
+    throw new TokenCapError(
+      `anthropic ${model}: hit max_tokens (${maxTokens}) after ${response.usage.output_tokens} output tokens${
+        text.trim() === '' ? ' without writing a reply' : ', cutting the reply off'
+      }; raise maxTokens or lower effort for this agent`
+    );
+  }
 
   return {
     text,
@@ -632,6 +667,10 @@ async function loadContext(
     const byStage: Record<string, number> = {};
     for (const row of data ?? []) byStage[row.stage] = (byStage[row.stage] ?? 0) + 1;
     ctx.pipeline = { byStage, total: data?.length ?? 0 };
+  }
+
+  if (scopes.includes('business_profile')) {
+    ctx.businessProfile = await loadBusinessProfile(db, workspaceId);
   }
 
   return ctx;

@@ -301,6 +301,68 @@ export type Database = {
           },
         ];
       };
+      business_profiles: {
+        Row: {
+          company_name: string;
+          created_at: string;
+          customer_types: string[];
+          description: string | null;
+          differentiators: string[];
+          exclusions: string[];
+          field_origins: Json;
+          id: string;
+          industries_served: string[];
+          pricing_model: string | null;
+          problems_solved: string[];
+          services: string[];
+          updated_at: string;
+          website: string | null;
+          workspace_id: string;
+        };
+        Insert: {
+          company_name: string;
+          created_at?: string;
+          customer_types?: string[];
+          description?: string | null;
+          differentiators?: string[];
+          exclusions?: string[];
+          field_origins?: Json;
+          id?: string;
+          industries_served?: string[];
+          pricing_model?: string | null;
+          problems_solved?: string[];
+          services?: string[];
+          updated_at?: string;
+          website?: string | null;
+          workspace_id: string;
+        };
+        Update: {
+          company_name?: string;
+          created_at?: string;
+          customer_types?: string[];
+          description?: string | null;
+          differentiators?: string[];
+          exclusions?: string[];
+          field_origins?: Json;
+          id?: string;
+          industries_served?: string[];
+          pricing_model?: string | null;
+          problems_solved?: string[];
+          services?: string[];
+          updated_at?: string;
+          website?: string | null;
+          workspace_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'business_profiles_workspace_id_fkey';
+            columns: ['workspace_id'];
+            isOneToOne: true;
+            referencedRelation: 'workspaces';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       enrichment_cache: {
         Row: {
           cache_key: string;
@@ -328,41 +390,118 @@ export type Database = {
         };
         Relationships: [];
       };
+      icp_generations: {
+        Row: {
+          agent_run_id: string | null;
+          business_profile_snapshot: Json;
+          created_at: string;
+          id: string;
+          recommendation_reason: string | null;
+          recommended_icp_id: string | null;
+          workspace_id: string;
+        };
+        Insert: {
+          agent_run_id?: string | null;
+          business_profile_snapshot?: Json;
+          created_at?: string;
+          id?: string;
+          recommendation_reason?: string | null;
+          recommended_icp_id?: string | null;
+          workspace_id: string;
+        };
+        Update: {
+          agent_run_id?: string | null;
+          business_profile_snapshot?: Json;
+          created_at?: string;
+          id?: string;
+          recommendation_reason?: string | null;
+          recommended_icp_id?: string | null;
+          workspace_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: 'icp_generations_agent_run_id_fkey';
+            columns: ['agent_run_id'];
+            isOneToOne: false;
+            referencedRelation: 'agent_runs';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'icp_generations_recommended_icp_id_fkey';
+            columns: ['recommended_icp_id'];
+            isOneToOne: false;
+            referencedRelation: 'icp_profiles';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'icp_generations_workspace_id_fkey';
+            columns: ['workspace_id'];
+            isOneToOne: false;
+            referencedRelation: 'workspaces';
+            referencedColumns: ['id'];
+          },
+        ];
+      };
       icp_profiles: {
         Row: {
           active: boolean;
+          archived_at: string | null;
           created_at: string;
+          exclusions: string[];
           filters: Json;
+          generation_id: string | null;
           id: string;
           name: string;
           offer: string | null;
+          origin: string;
+          pain_points: string[];
+          rationale: string | null;
           trigger_types: string[];
           updated_at: string;
           workspace_id: string;
         };
         Insert: {
           active?: boolean;
+          archived_at?: string | null;
           created_at?: string;
+          exclusions?: string[];
           filters?: Json;
+          generation_id?: string | null;
           id?: string;
           name: string;
           offer?: string | null;
+          origin?: string;
+          pain_points?: string[];
+          rationale?: string | null;
           trigger_types?: string[];
           updated_at?: string;
           workspace_id: string;
         };
         Update: {
           active?: boolean;
+          archived_at?: string | null;
           created_at?: string;
+          exclusions?: string[];
           filters?: Json;
+          generation_id?: string | null;
           id?: string;
           name?: string;
           offer?: string | null;
+          origin?: string;
+          pain_points?: string[];
+          rationale?: string | null;
           trigger_types?: string[];
           updated_at?: string;
           workspace_id?: string;
         };
         Relationships: [
+          {
+            foreignKeyName: 'icp_profiles_generation_id_fkey';
+            columns: ['generation_id'];
+            isOneToOne: false;
+            referencedRelation: 'icp_generations';
+            referencedColumns: ['id'];
+          },
           {
             foreignKeyName: 'icp_profiles_workspace_id_fkey';
             columns: ['workspace_id'];
@@ -762,7 +901,10 @@ export type Database = {
         | 'linkedin_specialist'
         | 'instagram_specialist'
         | 'voice_specialist'
-        | 'sourcing_scout';
+        | 'sourcing_scout'
+        | 'icp_strategist'
+        | 'website_reader'
+        | 'profile_guesser';
       channel: 'email' | 'sms' | 'voice' | 'linkedin' | 'instagram';
       consent_basis: 'written' | 'oral' | 'enquiry_implied' | 'legitimate_b2b' | 'none';
       lead_stage:
@@ -809,6 +951,9 @@ export const Constants = {
         'instagram_specialist',
         'voice_specialist',
         'sourcing_scout',
+        'icp_strategist',
+        'website_reader',
+        'profile_guesser',
       ],
       channel: ['email', 'sms', 'voice', 'linkedin', 'instagram'],
       consent_basis: ['written', 'oral', 'enquiry_implied', 'legitimate_b2b', 'none'],

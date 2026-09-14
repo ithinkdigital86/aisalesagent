@@ -212,12 +212,41 @@ const HEDGE =
 
 const DASHES = /[—–]/;
 
+/**
+ * Trailing legal forms that a record carries and a subject would not. "Skyline
+ * Retail Tech Ltd" in the subject line is still their company name whether or
+ * not the model typed the Ltd.
+ */
+const LEGAL_SUFFIX =
+  /\s+(?:ltd|limited|inc|incorporated|llc|plc|gmbh|ag|pty|co|corp|corporation)\.?$/i;
+
 /** Rule names built from a limit, kept beside the limit they quote. */
 const ONE_QUESTION = 'exactly one question, at the end, nothing after it';
 const SHORT_SENTENCE = `at least one sentence under ${LIMITS.shortSentenceWords} words`;
+const NO_COMPANY_IN_SUBJECT = 'no company name in the subject';
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Letters and digits only, so "NorthStar Cloud" and "northstarcloud" agree. */
+function squash(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Whether a subject names the company. The name is matched as written, on word
+ * boundaries, and then with its spaces and punctuation removed, because the
+ * model writes "northstarcloud" for NorthStar Cloud as readily as it writes the
+ * name. The squashed form needs a few characters behind it so a two-letter
+ * company does not match the inside of an ordinary word.
+ */
+function namesCompany(subject: string, companyName: string): boolean {
+  const name = companyName.trim().replace(LEGAL_SUFFIX, '').trim();
+  if (name === '') return false;
+  if (new RegExp(`\\b${escapeRegExp(name)}\\b`, 'i').test(subject)) return true;
+  const squashed = squash(name);
+  return squashed.length >= 4 && squash(subject).includes(squashed);
 }
 
 /**
@@ -276,20 +305,41 @@ function commaRun(sentence: string): string | null {
 }
 
 /**
+ * What the checker knows about the lead beyond the draft itself. The draft
+ * context has the whole record; only the fields a mechanical rule can use are
+ * named here, so the check stays as narrow as the rule it enforces.
+ */
+export interface DraftContext {
+  companyName?: string | null;
+}
+
+/**
  * Every tell in a draft, or an empty array. This is what the tests assert on,
  * and it is deliberately mechanical: it catches the strings and constructions
  * the prompt bans outright, not the judgement calls beside them ("do not open
  * two consecutive emails the same way", "build the observation on this lead's
  * own data") which need the rest of the sequence, or the lead record, to
- * assess.
+ * assess. The one rule that does need the record, no company name in the
+ * subject, is given the one field it needs and nothing else.
  */
-export function findAiTells(draft: { subject?: string; body: string }): AiTell[] {
+export function findAiTells(
+  draft: { subject?: string; body: string },
+  context: DraftContext = {}
+): AiTell[] {
   const tells: AiTell[] = [];
   const body = draft.body ?? '';
-  const all = [draft.subject ?? '', body].filter(Boolean).join('\n');
+  const subject = draft.subject ?? '';
+  const all = [subject, body].filter(Boolean).join('\n');
 
   const dash = DASHES.exec(all);
   if (dash) tells.push({ rule: 'no em dashes or en dashes', found: dash[0] });
+
+  // The company name in the subject is the mail-merge tell: a colleague does
+  // not tell you where you work. It is the recipient's name that is checked,
+  // not ours, and only in the subject, because the body may need to name them.
+  if (subject && context.companyName && namesCompany(subject, context.companyName)) {
+    tells.push({ rule: NO_COMPANY_IN_SUBJECT, found: subject });
+  }
 
   for (const opener of BANNED_OPENERS) {
     if (contains(all, opener)) tells.push({ rule: 'banned opener', found: opener });
@@ -367,15 +417,31 @@ export function findAiTells(draft: { subject?: string; body: string }): AiTell[]
  * does not know what an agent produces, so the narrowing happens here: an
  * output with no usable body is not a clean draft, it is nothing to review,
  * and the schema has already rejected that case before this runs.
+ *
+ * `input` is the same object buildPrompt was given, so the lead the draft was
+ * written for is read from the same place the prompt read it. A missing or
+ * unshaped lead just means the company rule has nothing to check against.
  */
-export function reviewDraft(output: unknown): AiTell[] {
+export function reviewDraft(output: unknown, input?: unknown): AiTell[] {
   if (typeof output !== 'object' || output === null) return [];
   const draft = output as { subject?: unknown; body?: unknown };
   if (typeof draft.body !== 'string') return [];
-  return findAiTells({
-    subject: typeof draft.subject === 'string' ? draft.subject : undefined,
-    body: draft.body,
-  });
+  return findAiTells(
+    {
+      subject: typeof draft.subject === 'string' ? draft.subject : undefined,
+      body: draft.body,
+    },
+    { companyName: companyNameOf(input) }
+  );
+}
+
+/** The lead's company_name out of a prompt input, or undefined if it has none. */
+function companyNameOf(input: unknown): string | undefined {
+  if (typeof input !== 'object' || input === null) return undefined;
+  const lead = (input as { lead?: unknown }).lead;
+  if (typeof lead !== 'object' || lead === null) return undefined;
+  const name = (lead as { company_name?: unknown }).company_name;
+  return typeof name === 'string' && name.trim() !== '' ? name : undefined;
 }
 
 /** The banned lists as the prompt states them, one rule per line. */
@@ -402,10 +468,12 @@ function contractionRule(): string {
 }
 
 const CHANNEL_RULES: Record<string, string> = {
-  email: `Subject line: ${LIMITS.subjectWordsMin} to ${LIMITS.subjectWordsMax} words, lowercase, no colons, no title case, reads like a note from a colleague rather than a campaign.
-It must be specific to this company, this person's role, or the trigger you are writing about, specific enough that it could not be pasted onto any other prospect. Name the thing. A subject naming their new office, their hiring push, or the job they actually do beats one naming a category.
-Write it to be opened, not to summarise the email. It is a reason to look, not an abstract of what is inside, and it must not simply restate your first line.
-No generic openers: not "quick question", not "idea for you", not "following up", not your company name paired with a benefit claim.
+  email: `Subject line: ${LIMITS.subjectWordsMin} to ${LIMITS.subjectWordsMax} words, lowercase, no colons, no title case. Write it as if typing to someone you already know, about something you noticed.
+Do not put their company name in the subject, in any spelling. The recipient knows where they work. Seeing it there is what a mail merge does, and it is the tell that marks the message as one of a batch before it is opened. This is checked.
+No fixed shape. A subject can be a fragment of the observation, an oddly specific detail from their record, or something that reads like the start of a thought the first line finishes. Vary it. Two subjects built the same way read as generated even when each is specific, so if the shape you have reached for is one you have used before, use a different one.
+It must not summarise the email. It is a reason to look, not an abstract of what is inside, and it must not restate your first line.
+Still specific to this person, specific enough that it could not be pasted onto any other prospect, but the specificity comes from the detail you noticed, never from naming them.
+No generic openers: not "quick question", not "idea for you", not "following up", and not the sender's company paired with a benefit claim.
 Body: ${LIMITS.emailWordsMin} to ${LIMITS.emailWordsMax} words. This is a ceiling, not a target to fill, and it is counted.
 One idea and one question. Nothing else. No second paragraph of setup, no scene-setting preamble, no restating the offer, no bullet lists, no signature block, that gets appended later.
 Cut every sentence that is not the observation, the idea, or the question.
@@ -436,34 +504,50 @@ Short words. No subordinate clauses. It has to survive being heard once.`,
  * Every example has to clear findAiTells and the email length rule, and the
  * tests hold them to that. A target that breaks a counted rule teaches the
  * model to break it, and the corrective retry then bounces the imitation.
+ *
+ * Each carries a subject, and the three are built three different ways on
+ * purpose: the start of a thought, an oddly specific detail, a fragment of the
+ * observation. Shown one shape, the model produced that shape every time, with
+ * the company name in front of it. None names the company.
  */
 export const WORKED_EXAMPLES = [
   {
     step: 1,
-    note: 'First touch with nothing specific to anchor on, so personalisation_anchor is "none". It names the guess as a guess once, then describes their week as if it could see it, and never says what the guess rests on.',
+    note: 'First touch with nothing specific to anchor on, so personalisation_anchor is "none". It names the guess as a guess once, then describes their week as if it could see it, and never says what the guess rests on. The subject is the start of a thought that the first line picks up.',
+    subject: "if outbound is nobody's first job",
     body:
       "We haven't spoken, so I'll be direct about the guess I'm making. At a 120 person software company, the marketing team is usually spread across brand and content, and outbound ends up as someone's third priority. Someone books a call and it lands in the CRM with no context. Sales quietly stops trusting marketing's leads. Who owns outbound end to end on your side?",
   },
   {
     step: 1,
-    note: 'First touch built on a trigger, four support agent roles opened in June. The trigger is the first line, the rest is what it implies, and it stops once the question is asked.',
+    note: 'First touch built on a trigger, four support agent roles opened in June. The trigger is the first line, the rest is what it implies, and it stops once the question is asked. The subject is one oddly specific detail from the middle of the message, not the trigger and not a summary.',
+    subject: 'the same eight questions',
     body:
       "You've had four support agent roles open since June. Hiring in a block like that usually means the queue got away from the team a couple of months earlier and headcount was the only lever within reach. New agents take a quarter to get fast. The queue doesn't wait. My guess is most of the backlog is the same eight questions asked in slightly different words. Is that what it looks like from where you sit?",
   },
   {
     step: 2,
-    note: 'Step 2 to the same person, no reply to the first. It opens on a different observation, refers back to the first message in a clause rather than recapping it, and stays well under the first-touch length.',
+    note: 'Step 2 to the same person, no reply to the first. It opens on a different observation, refers back to the first message in a clause rather than recapping it, and stays well under the first-touch length. The subject is a fragment of the observation, typed the way you would to someone you know.',
+    subject: 'your help centre since march',
     body:
       "Your help centre hasn't changed since March, which I noticed after writing to you about the support roles. That's the part that worries me more than the hiring. Every new agent is being trained to answer questions a page could have. Which of those questions comes up most?",
   },
 ] as const;
 
-/** The examples as the prompt presents them: the target, not a template. */
-function workedExamples(): string {
-  const shown = WORKED_EXAMPLES.map(
-    (example, n) => `Example ${n + 1}. ${example.note}\n"${example.body}"`
-  ).join('\n\n');
-  return `What the target reads like. The finished emails below are each clean on every rule above. Read them for the voice: one person saying what they think is going on at another person's company, in plain words, with nothing for sale. Then put them down. They are examples, not templates. Do not reuse their openings, their sentence shapes or their phrasing, and do not lift the first sentence of any of them: an opener that shows up in more than one draft is a template, whatever it says. What your message says comes from the lead in front of you and nowhere else; these only show what a finished one sounds like. On a channel other than email, keep the voice and follow that channel's length.
+/**
+ * The examples as the prompt presents them: the target, not a template. The
+ * subjects are shown only on email, the one channel that has one.
+ */
+function workedExamples(channel: string): string {
+  const withSubject = channel === 'email';
+  const shown = WORKED_EXAMPLES.map((example, n) => {
+    const subject = withSubject ? `subject "${example.subject}"\n` : '';
+    return `Example ${n + 1}. ${example.note}\n${subject}"${example.body}"`;
+  }).join('\n\n');
+  const subjects = withSubject
+    ? ' The three subjects are built three different ways on purpose. None of them is the shape to copy, and none names the company.'
+    : '';
+  return `What the target reads like. The finished emails below are each clean on every rule above. Read them for the voice: one person saying what they think is going on at another person's company, in plain words, with nothing for sale. Then put them down. They are examples, not templates. Do not reuse their openings, their sentence shapes or their phrasing, and do not lift the first sentence of any of them: an opener that shows up in more than one draft is a template, whatever it says.${subjects} What your message says comes from the lead in front of you and nowhere else; these only show what a finished one sounds like. On a channel other than email, keep the voice and follow that channel's length.
 
 ${shown}`;
 }
@@ -524,7 +608,7 @@ ${contractionRule()}
 Channel rules for this message:
 ${CHANNEL_RULES[channel] ?? CHANNEL_RULES.email}
 
-${workedExamples()}
+${workedExamples(channel)}
 
 Return only a JSON object with no prose and no markdown fences:
 {"subject": string (omit for non-email), "body": string, "opening_line_rationale": string, "personalisation_anchor": string, "word_count": number}
@@ -533,6 +617,7 @@ Hard limits.
 
 subject is checked and rejected if it breaks its limit, because the recipient reads it:
 - at most ${LIMITS.subject} characters, and the channel rules above are tighter still
+- never contains their company name, in any spelling
 - omit the field entirely on any channel that has no subject line
 
 These are metadata. Anything longer is cut off, so lead with the part that matters:

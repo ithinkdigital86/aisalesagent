@@ -31,8 +31,16 @@ export const icpFiltersSchema = z.object({
   exclusions: z.object({ domains: z.array(z.string().min(1)).optional() }).optional(),
 });
 
+/**
+ * Where a profile came from. 'generated' means the ICP strategist proposed
+ * it; the mark survives editing and activation because what it records is
+ * provenance, not who last touched the row.
+ */
+export type IcpOrigin = 'human' | 'generated';
+
 /** The columns any agent-facing read of an ICP needs. */
-export const ICP_COLUMNS = 'id, name, offer, filters, trigger_types, active, updated_at';
+export const ICP_COLUMNS =
+  'id, name, offer, filters, trigger_types, active, updated_at, origin, pain_points, exclusions, rationale';
 
 export interface ActiveIcp {
   id: string;
@@ -40,6 +48,18 @@ export interface ActiveIcp {
   offer: string | null;
   filters: IcpFiltersShape;
   trigger_types: string[];
+  origin: IcpOrigin;
+  /** The problems a buyer in this segment is living with. */
+  pain_points: string[];
+  /** Who in this segment not to pursue, in plain language. */
+  exclusions: string[];
+  /** Why this segment fits the business. */
+  rationale: string | null;
+}
+
+/** Tolerant read of the origin column: anything unrecognised reads as human. */
+export function parseOrigin(value: string | null | undefined): IcpOrigin {
+  return value === 'generated' ? 'generated' : 'human';
 }
 
 /**
@@ -53,7 +73,7 @@ export async function loadActiveIcp(
 ): Promise<ActiveIcp | null> {
   const { data } = await db
     .from('icp_profiles')
-    .select('id, name, offer, filters, trigger_types')
+    .select('id, name, offer, filters, trigger_types, origin, pain_points, exclusions, rationale')
     .eq('workspace_id', workspaceId)
     .eq('active', true)
     .limit(1)
@@ -67,6 +87,10 @@ export async function loadActiveIcp(
     offer: data.offer,
     filters: parseFilters(data.filters),
     trigger_types: data.trigger_types ?? [],
+    origin: parseOrigin(data.origin),
+    pain_points: data.pain_points ?? [],
+    exclusions: data.exclusions ?? [],
+    rationale: data.rationale,
   };
 }
 
@@ -204,6 +228,12 @@ export function describeIcp(icp: ActiveIcp | null | undefined): string {
     );
   }
   if (f.geos?.length) lines.push(`Geography: ${f.geos.join(', ')}`);
+  if (icp.pain_points?.length) {
+    lines.push(`Problems these buyers are living with: ${icp.pain_points.join('; ')}`);
+  }
+  if (icp.exclusions?.length) {
+    lines.push(`Do not pursue: ${icp.exclusions.join('; ')}`);
+  }
   if (f.exclusions?.domains?.length) {
     lines.push(`Excluded domains: ${f.exclusions.domains.join(', ')}`);
   }
@@ -211,6 +241,7 @@ export function describeIcp(icp: ActiveIcp | null | undefined): string {
     lines.push(`Buying triggers that make a lead urgent: ${icp.trigger_types.join(', ')}`);
   }
   lines.push(`What we sell them: ${icp.offer?.trim() || 'not described'}`);
+  if (icp.rationale?.trim()) lines.push(`Why this segment: ${icp.rationale.trim()}`);
 
   return lines.join('\n');
 }

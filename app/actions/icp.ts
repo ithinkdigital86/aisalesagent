@@ -32,6 +32,10 @@ const saveSchema = z.object({
   excludeDomains: z.array(z.string().trim().min(1)).max(50).default([]),
   triggerTypes: z.array(z.string().trim().min(1)).max(20).default([]),
   offer: z.string().trim().max(2000),
+  painPoints: z.array(z.string().trim().min(1).max(200)).max(12).default([]),
+  /** Plain-language exclusions. Domains to block are excludeDomains. */
+  exclusions: z.array(z.string().trim().min(1).max(200)).max(12).default([]),
+  rationale: z.string().trim().max(1000).default(''),
   /** Make this the profile the agents read once it is saved. */
   makeActive: z.boolean().default(false),
 });
@@ -93,12 +97,17 @@ export async function saveIcp(input: SaveIcpInput): Promise<IcpActionResult> {
       delete filters.employee_range;
     }
 
+    // origin is deliberately not in here. A generated profile the owner edits
+    // is still a generated profile, and a human one never becomes generated.
     const row = {
       workspace_id: value.workspaceId,
       name: value.name,
       offer: value.offer === '' ? null : value.offer,
       filters: filters as Json,
       trigger_types: value.triggerTypes,
+      pain_points: value.painPoints,
+      exclusions: value.exclusions,
+      rationale: value.rationale === '' ? null : value.rationale,
     };
 
     let id: string;
@@ -113,16 +122,21 @@ export async function saveIcp(input: SaveIcpInput): Promise<IcpActionResult> {
       if (error) return { ok: false, error: error.message };
       id = value.id;
     } else {
-      // The first profile in a workspace becomes the active one: a workspace
-      // with a profile nobody activated is the bug this page exists to fix.
+      // A profile a human writes into a workspace with nothing active becomes
+      // the active one: a workspace with a profile nobody activated is the bug
+      // this page exists to fix. It is "nothing active" rather than "no other
+      // profile" so that a generated suggestion the owner already activated is
+      // not silently replaced, and so that a pile of unactivated suggestions
+      // does not stop the first human profile from going live.
       const { count } = await db
         .from('icp_profiles')
         .select('id', { count: 'exact', head: true })
-        .eq('workspace_id', value.workspaceId);
+        .eq('workspace_id', value.workspaceId)
+        .eq('active', true);
 
       const { data: created, error } = await db
         .from('icp_profiles')
-        .insert({ ...row, active: false })
+        .insert({ ...row, active: false, origin: 'human' })
         .select('id')
         .single();
       if (error || !created) {
@@ -169,6 +183,52 @@ export async function activateIcp(input: {
 
     revalidatePath('/icp');
     revalidatePath('/leads');
+    return { ok: true, id: parsed.data.id };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'unknown_error' };
+  }
+}
+
+const dismissSchema = activateSchema;
+
+/**
+ * Put a suggestion away without deleting it. The row stays because a lead
+ * scored against it keeps pointing at it; archived_at just takes it off the
+ * page. An active profile cannot be dismissed: activate another one first.
+ */
+export async function dismissIcp(input: {
+  workspaceId: string;
+  id: string;
+}): Promise<IcpActionResult> {
+  try {
+    const parsed = dismissSchema.safeParse(input);
+    if (!parsed.success) return { ok: false, error: 'Invalid profile' };
+
+    const db = await supabaseServer();
+    const {
+      data: { user },
+    } = await db.auth.getUser();
+    if (!user) return { ok: false, error: 'Unauthorised' };
+
+    const { data: target } = await db
+      .from('icp_profiles')
+      .select('id, active')
+      .eq('id', parsed.data.id)
+      .eq('workspace_id', parsed.data.workspaceId)
+      .maybeSingle();
+    if (!target) return { ok: false, error: 'Profile not found' };
+    if (target.active) {
+      return { ok: false, error: 'This is the active profile. Activate another one before dismissing it.' };
+    }
+
+    const { error } = await db
+      .from('icp_profiles')
+      .update({ archived_at: new Date().toISOString() })
+      .eq('id', parsed.data.id)
+      .eq('workspace_id', parsed.data.workspaceId);
+    if (error) return { ok: false, error: error.message };
+
+    revalidatePath('/icp');
     return { ok: true, id: parsed.data.id };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : 'unknown_error' };

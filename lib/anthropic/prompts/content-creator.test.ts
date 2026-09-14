@@ -14,8 +14,8 @@
 // on: a clean one has no tells, and one carrying an em dash, a banned opener, a
 // banned phrase, a jargon coinage, a "not just X, but Y", a rule-of-three list
 // in either punctuation, a mid-body rhetorical question, a second question, a
-// written-out "I am", a hedging pair, no short sentence at all, or a sign-off
-// pleasantry is caught by name.
+// written-out "I am", a hedging pair, no short sentence at all, a sign-off
+// pleasantry, or the lead's company name in the subject is caught by name.
 //
 // The worked examples sit between the two. They are shown to the model as the
 // target, so each one is held to every counted rule and to the email length
@@ -60,8 +60,12 @@ function systemPrompt(channel = 'email'): string {
   }).system;
 }
 
-/** The draft shape the runtime hands on, after outputSchema has had it. */
-function draft(body: string, subject = 'acme support hiring') {
+/**
+ * The draft shape the runtime hands on, after outputSchema has had it. The
+ * default subject is clean on every rule, including the company one, so a
+ * test that passes the lead in sees only the tell it planted.
+ */
+function draft(body: string, subject = 'four roles since june') {
   return outputSchema.parse({
     subject,
     body,
@@ -206,8 +210,33 @@ test('the constraints that predate the anti-tell rules are still there', () => {
   assert.match(system, /not a case study, not a statistic/);
   // A subject that could not be pasted onto another prospect.
   assert.ok(system.includes('could not be pasted onto any other prospect'));
+  assert.match(system, /No generic openers: not "quick question"/);
   // An honest hypothesis where there is no real proof.
   assert.ok(system.includes('honest hypothesis'));
+});
+
+test('the subject rules ban the company name, a fixed shape, and a summary', () => {
+  const system = systemPrompt();
+  assert.match(system, /Do not put their company name in the subject/);
+  assert.match(system, /The recipient knows where they work/);
+  assert.match(system, /This is checked/);
+  assert.match(system, /No fixed shape/);
+  assert.match(system, /a fragment of the observation/);
+  assert.match(system, /an oddly specific detail/);
+  assert.match(system, /the start of a thought/);
+  assert.match(system, /as if typing to someone you already know/);
+  assert.match(system, /It must not summarise the email/);
+  assert.match(system, /a reason to look, not an abstract/);
+  assert.ok(system.includes(`${LIMITS.subjectWordsMin} to ${LIMITS.subjectWordsMax} words, lowercase, no colons`));
+  // The old rule told the model to name the company, and it is gone.
+  assert.ok(!system.includes('It must be specific to this company'));
+  assert.ok(!system.includes('Name the thing.'));
+});
+
+test('the hard limits say the subject is checked for the company name', () => {
+  const system = systemPrompt();
+  const limits = system.slice(system.indexOf('Hard limits.'));
+  assert.match(limits, /never contains their company name/);
 });
 
 // ---------------------------------------------------------------
@@ -276,6 +305,58 @@ test('the examples cover both branches of the anchor rule and a later step', () 
   assert.ok(WORKED_EXAMPLES.some((example) => example.step > 1));
 });
 
+test('every worked example carries a subject that obeys the subject rules', () => {
+  for (const [n, example] of WORKED_EXAMPLES.entries()) {
+    const words = example.subject.trim().split(/\s+/).length;
+    assert.ok(
+      words >= LIMITS.subjectWordsMin && words <= LIMITS.subjectWordsMax,
+      `example ${n + 1} subject is ${words} words`
+    );
+    assert.equal(example.subject, example.subject.toLowerCase(), `example ${n + 1} subject is not lowercase`);
+    assert.ok(!example.subject.includes(':'), `example ${n + 1} subject has a colon`);
+    // A subject is a reason to look, so it is not the first line again.
+    assert.ok(!example.body.toLowerCase().startsWith(example.subject), `example ${n + 1} subject restates the opener`);
+  }
+});
+
+test('the example subjects are built different ways, so no one shape is modelled', () => {
+  const subjects = WORKED_EXAMPLES.map((example) => example.subject);
+  const firstWords = subjects.map((subject) => subject.split(/\s+/)[0]);
+  assert.equal(new Set(firstWords).size, subjects.length, `subjects share an opening word: ${subjects.join(' / ')}`);
+  const lengths = subjects.map((subject) => subject.split(/\s+/).length);
+  assert.ok(new Set(lengths).size > 1, 'every subject is the same length');
+  // The three shapes the rule names are each shown once, in the notes.
+  const notes = WORKED_EXAMPLES.map((example) => example.note);
+  for (const shape of ['start of a thought', 'oddly specific detail', 'fragment of the observation']) {
+    assert.ok(notes.some((note) => note.includes(shape)), `no example is marked as ${shape}`);
+  }
+});
+
+test('no example subject names a company, including the one each example is about', () => {
+  // The bodies do not name a company, so any name is a stand-in for whichever
+  // lead the example is read against. The checker is run with a few.
+  for (const [n, example] of WORKED_EXAMPLES.entries()) {
+    for (const company of ['Acme', 'NorthStar Cloud', 'Quantum', 'Skyline Retail Tech Ltd']) {
+      const tells = findAiTells(draft(example.body, example.subject), { companyName: company });
+      assert.deepEqual(tells, [], `example ${n + 1} carries a tell against ${company}`);
+    }
+  }
+});
+
+test('the example subjects reach the email prompt and only the email prompt', () => {
+  const email = systemPrompt('email');
+  for (const example of WORKED_EXAMPLES) {
+    assert.ok(email.includes(`subject "${example.subject}"`), `subject missing: ${example.subject}`);
+  }
+  assert.match(email, /The three subjects are built three different ways on purpose/);
+  for (const channel of ['linkedin', 'instagram', 'voice']) {
+    const system = systemPrompt(channel);
+    for (const example of WORKED_EXAMPLES) {
+      assert.ok(!system.includes(`subject "${example.subject}"`), `${channel} shows a subject`);
+    }
+  }
+});
+
 test('no example describes what we do or explains the guess by size, role or industry', () => {
   for (const [n, example] of WORKED_EXAMPLES.entries()) {
     const body = example.body.toLowerCase();
@@ -298,7 +379,7 @@ test('a clean draft has no tells', () => {
 
 test('a clean draft still parses to the shape the runtime hands on', () => {
   const parsed = draft(CLEAN_BODY);
-  assert.equal(parsed.subject, 'acme support hiring');
+  assert.equal(parsed.subject, 'four roles since june');
   // word_count is recomputed rather than trusted, so the shape is complete.
   assert.equal(parsed.word_count, CLEAN_BODY.trim().split(/\s+/).length);
   assert.deepEqual(findAiTells(parsed), []);
@@ -555,6 +636,62 @@ test('a draft can break several rules at once and every one is reported', () => 
 });
 
 // ---------------------------------------------------------------
+// The company name in the subject
+// ---------------------------------------------------------------
+//
+// Naming the company in the subject is what a mail merge does. The check is
+// given the lead's company_name and nothing else, and it only reads the
+// subject: the body is allowed to name them.
+
+const COMPANY_RULE = 'no company name in the subject';
+
+test('a subject naming the company is caught, quoting the subject back', () => {
+  const tells = findAiTells(draft(CLEAN_BODY, 'acme support hiring'), { companyName: 'Acme' });
+  assert.deepEqual(tells, [{ rule: COMPANY_RULE, found: 'acme support hiring' }]);
+});
+
+test('the company name is matched whatever the case and wherever it sits', () => {
+  for (const subject of ['quiet leads at quantum', 'Quantum lead intake', 'the quantum queue']) {
+    const tells = findAiTells(draft(CLEAN_BODY, subject), { companyName: 'Quantum' });
+    assert.deepEqual(tells.map((t) => t.rule), [COMPANY_RULE], `not caught: ${subject}`);
+  }
+});
+
+test('a company name run together, the way the model writes a domain, is still the name', () => {
+  const tells = findAiTells(draft(CLEAN_BODY, 'northstarcloud lead intake flow'), {
+    companyName: 'NorthStar Cloud',
+  });
+  assert.deepEqual(tells.map((t) => t.rule), [COMPANY_RULE]);
+});
+
+test('the legal suffix on the record does not hide the name', () => {
+  const tells = findAiTells(draft(CLEAN_BODY, 'skyline retail tech utms'), {
+    companyName: 'Skyline Retail Tech Ltd',
+  });
+  assert.deepEqual(tells.map((t) => t.rule), [COMPANY_RULE]);
+});
+
+test('a short company name is matched on word boundaries, not inside a word', () => {
+  assert.deepEqual(findAiTells(draft(CLEAN_BODY, 'the going rate for agents'), { companyName: 'Go' }), []);
+  assert.deepEqual(
+    findAiTells(draft(CLEAN_BODY, 'where go leads land'), { companyName: 'Go' }).map((t) => t.rule),
+    [COMPANY_RULE]
+  );
+});
+
+test('the company name in the body is not the subject tell', () => {
+  const body = "Acme's hiring four support agents this quarter. The queue got there first. Is the volume seasonal?";
+  assert.deepEqual(findAiTells(draft(body), { companyName: 'Acme' }), []);
+});
+
+test('with no company known, or no subject, there is nothing to check', () => {
+  assert.deepEqual(findAiTells(draft(CLEAN_BODY, 'acme support hiring')), []);
+  assert.deepEqual(findAiTells(draft(CLEAN_BODY, 'acme support hiring'), { companyName: null }), []);
+  assert.deepEqual(findAiTells(draft(CLEAN_BODY, 'acme support hiring'), { companyName: '   ' }), []);
+  assert.deepEqual(findAiTells({ body: CLEAN_BODY }, { companyName: 'Acme' }), []);
+});
+
+// ---------------------------------------------------------------
 // The review hook the runtime calls
 // ---------------------------------------------------------------
 //
@@ -581,6 +718,23 @@ test('reviewDraft reads the subject as well as the body', () => {
     tells.map((t) => t.rule),
     ['banned opener']
   );
+});
+
+test('reviewDraft reads the company off the prompt input it is handed', () => {
+  const input = { lead: LEAD, channel: 'email' };
+  const tells = reviewDraft(draft(CLEAN_BODY, 'acme support hiring'), input);
+  assert.deepEqual(tells, [{ rule: COMPANY_RULE, found: 'acme support hiring' }]);
+  assert.deepEqual(reviewDraft(draft(CLEAN_BODY), input), []);
+});
+
+test('reviewDraft without a usable lead in the input skips the company rule', () => {
+  for (const input of [undefined, null, {}, { lead: null }, { lead: 'Acme' }, { lead: { company_name: 7 } }]) {
+    assert.deepEqual(
+      reviewDraft(draft(CLEAN_BODY, 'acme support hiring'), input),
+      [],
+      `input ${JSON.stringify(input)}`
+    );
+  }
 });
 
 test('reviewDraft has nothing to say about an output that is not a draft', () => {
