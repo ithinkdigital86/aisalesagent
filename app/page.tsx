@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 import { ensureWorkspace } from '@/app/actions/auth';
+import { RecentActivity, type RecentAction } from '@/components/dashboard/recent-activity';
 import { RunButtons } from '@/components/dashboard/run-buttons';
 import { SignOutButton } from '@/components/auth/sign-out-button';
 import { costUsd } from '@/lib/cadence/pricing';
@@ -71,7 +72,10 @@ export default async function Home() {
         .maybeSingle(),
       db
         .from('actions')
-        .select('id, channel, status, subject, block_reason, lead:leads(full_name, company_name)')
+        // The whole row, because each one opens into its full text.
+        .select(
+          'id, channel, status, agent, step_number, subject, body, ai_tells, block_reason, created_at, scheduled_for, sent_at, replied_at, reply_body, reply_sentiment, lead:leads(full_name, company_name, title, email, stage)'
+        )
         .eq('workspace_id', workspaceId)
         .order('created_at', { ascending: false })
         .limit(8),
@@ -216,7 +220,12 @@ export default async function Home() {
       </section>
 
       <section className="rounded-xl border p-5">
-        <h2 className="mb-4 text-sm font-medium text-muted-foreground">Recent activity</h2>
+        <div className="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-sm font-medium text-muted-foreground">Recent activity</h2>
+          {recent && recent.length > 0 ? (
+            <span className="text-xs text-muted-foreground">Click a row to read the message</span>
+          ) : null}
+        </div>
         {!recent || recent.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             No outbound actions yet. Draft an email from the{' '}
@@ -226,24 +235,7 @@ export default async function Home() {
             page, then process the send queue.
           </p>
         ) : (
-          <ul className="divide-y">
-            {recent.map((action) => (
-              <li key={action.id} className="flex items-center justify-between gap-3 py-2 text-sm">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-xs text-muted-foreground">{action.channel}</span>
-                    <span className="truncate">{leadLabel(action.lead)}</span>
-                  </div>
-                  {action.block_reason ? (
-                    <div className="truncate text-xs text-destructive">{action.block_reason}</div>
-                  ) : action.subject ? (
-                    <div className="truncate text-xs text-muted-foreground">{action.subject}</div>
-                  ) : null}
-                </div>
-                <span className={statusBadge(action.status)}>{action.status}</span>
-              </li>
-            ))}
-          </ul>
+          <RecentActivity actions={recent as RecentAction[]} />
         )}
       </section>
 
@@ -321,20 +313,6 @@ export default async function Home() {
       </dl>
     </main>
   );
-}
-
-function leadLabel(lead: unknown): string {
-  const one = Array.isArray(lead) ? lead[0] : lead;
-  const record = one as { full_name?: string | null; company_name?: string | null } | null;
-  return record?.full_name ?? record?.company_name ?? 'Unknown lead';
-}
-
-function statusBadge(status: string): string {
-  const base = 'shrink-0 rounded-md px-2 py-0.5 font-mono text-xs ';
-  if (status === 'sent') return `${base}bg-primary text-primary-foreground`;
-  if (status === 'blocked' || status === 'failed') return `${base}bg-destructive/10 text-destructive`;
-  if (status === 'awaiting_approval') return `${base}border`;
-  return `${base}bg-secondary text-secondary-foreground`;
 }
 
 function StatTile({ label, value }: { label: string; value: string }) {

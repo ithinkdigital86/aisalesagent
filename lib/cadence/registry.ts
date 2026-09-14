@@ -6,6 +6,7 @@
 import { z } from 'zod';
 import * as qualifier from '@/lib/anthropic/prompts/qualifier';
 import * as contentCreator from '@/lib/anthropic/prompts/content-creator';
+import type { AiTell } from '@/lib/anthropic/prompts/content-creator';
 import * as followUp from '@/lib/anthropic/prompts/follow-up';
 import * as salesManager from '@/lib/anthropic/prompts/sales-manager';
 import type { AgentSlug } from './roster';
@@ -13,6 +14,11 @@ import type { AgentSlug } from './roster';
 // The slug list lives in ./roster so prompt files can name the team without
 // importing this module, which imports them.
 export type { AgentSlug };
+
+// The shape a reviewOutput hook reports in. It is the content creator's type
+// because that is the only agent with a review today, and the runtime reads
+// it from here so it never has to know which prompt file it came from.
+export type { AiTell };
 
 /** What slice of the shared brain an agent is allowed to read. */
 export type ContextScope =
@@ -60,6 +66,15 @@ export type AgentDefinition = ModelChoice & {
    * unset for agents whose output is worthless in part.
    */
   salvageSchema?: z.ZodTypeAny;
+  /**
+   * Optional quality check on an output that has already passed outputSchema.
+   * It returns every rule the output breaks, empty when it is clean. The
+   * runtime spends its one corrective retry on a non-empty answer, quoting the
+   * rules back, and keeps the draft with the tells attached if the retry still
+   * trips one. Leave it unset for agents whose output is not prose: the run
+   * then logs no tell count at all, so it never reads as a clean one.
+   */
+  reviewOutput?: (output: unknown) => AiTell[];
 };
 
 export const AGENTS: Record<AgentSlug, AgentDefinition> = {
@@ -86,6 +101,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
     writesChannels: [],
     buildPrompt: contentCreator.buildPrompt,
     outputSchema: contentCreator.outputSchema,
+    reviewOutput: contentCreator.reviewDraft,
   },
 
   follow_up: {
@@ -116,8 +132,9 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   },
 
   // Channel specialists reuse the content creator's prompt with a channel
-  // constraint injected. Split them into their own prompt files once each
-  // channel's voice diverges enough to need it.
+  // constraint injected, and its review, because the style rules it checks
+  // are the ones every channel is given. Split them into their own prompt
+  // files once each channel's voice diverges enough to need it.
   email_specialist: {
     slug: 'email_specialist',
     label: 'Email specialist',
@@ -128,6 +145,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
     writesChannels: ['email'],
     buildPrompt: (i) => contentCreator.buildPrompt({ ...(i as object), channel: 'email' }),
     outputSchema: contentCreator.outputSchema,
+    reviewOutput: contentCreator.reviewDraft,
   },
 
   linkedin_specialist: {
@@ -140,6 +158,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
     writesChannels: ['linkedin'],
     buildPrompt: (i) => contentCreator.buildPrompt({ ...(i as object), channel: 'linkedin' }),
     outputSchema: contentCreator.outputSchema,
+    reviewOutput: contentCreator.reviewDraft,
   },
 
   instagram_specialist: {
@@ -152,6 +171,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
     writesChannels: ['instagram'],
     buildPrompt: (i) => contentCreator.buildPrompt({ ...(i as object), channel: 'instagram' }),
     outputSchema: contentCreator.outputSchema,
+    reviewOutput: contentCreator.reviewDraft,
   },
 
   voice_specialist: {
@@ -164,6 +184,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
     writesChannels: ['voice'],
     buildPrompt: (i) => contentCreator.buildPrompt({ ...(i as object), channel: 'voice' }),
     outputSchema: contentCreator.outputSchema,
+    reviewOutput: contentCreator.reviewDraft,
   },
 
   sourcing_scout: {

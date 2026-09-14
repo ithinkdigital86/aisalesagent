@@ -21,6 +21,7 @@ export type Database = {
       actions: {
         Row: {
           agent: Database['public']['Enums']['agent_slug'];
+          ai_tells: Json | null;
           block_reason: string | null;
           body: string;
           channel: Database['public']['Enums']['channel'];
@@ -45,6 +46,7 @@ export type Database = {
         };
         Insert: {
           agent: Database['public']['Enums']['agent_slug'];
+          ai_tells?: Json | null;
           block_reason?: string | null;
           body: string;
           channel: Database['public']['Enums']['channel'];
@@ -69,6 +71,7 @@ export type Database = {
         };
         Update: {
           agent?: Database['public']['Enums']['agent_slug'];
+          ai_tells?: Json | null;
           block_reason?: string | null;
           body?: string;
           channel?: Database['public']['Enums']['channel'];
@@ -168,6 +171,7 @@ export type Database = {
       agent_runs: {
         Row: {
           agent: Database['public']['Enums']['agent_slug'];
+          ai_tell_count: number | null;
           created_at: string;
           duration_ms: number | null;
           error: string | null;
@@ -182,6 +186,7 @@ export type Database = {
         };
         Insert: {
           agent: Database['public']['Enums']['agent_slug'];
+          ai_tell_count?: number | null;
           created_at?: string;
           duration_ms?: number | null;
           error?: string | null;
@@ -196,6 +201,7 @@ export type Database = {
         };
         Update: {
           agent?: Database['public']['Enums']['agent_slug'];
+          ai_tell_count?: number | null;
           created_at?: string;
           duration_ms?: number | null;
           error?: string | null;

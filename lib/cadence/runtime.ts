@@ -6,8 +6,8 @@
 //
 // Two providers, one runtime. The only thing that branches on the provider is
 // callModel below: the same context, the same JSON parse, the same schema
-// validation, the same corrective retry and the same agent_runs row apply
-// whichever API answered. Keep it that way. Anything that is not literally a
+// validation, the same output review, the same corrective retry and the same
+// agent_runs row apply whichever API answered. Keep it that way. Anything that is not literally a
 // difference in the HTTP call does not belong behind that branch.
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -15,11 +15,20 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { z } from 'zod';
 import type { Database, Json, Tables } from '@/types/database';
 import { describeIssues } from '@/lib/anthropic/schema';
-import { AGENTS, type AgentDefinition, type AgentSlug, type ContextScope } from './registry';
+import {
+  AGENTS,
+  type AgentDefinition,
+  type AgentSlug,
+  type AiTell,
+  type ContextScope,
+} from './registry';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
-/** One corrective retry. Past that the prompt is wrong, not the sampling. */
+/**
+ * One corrective retry, shared between the schema and the review. Past that
+ * the prompt is wrong, not the sampling.
+ */
 const MAX_ATTEMPTS = 2;
 
 export type RunFailureKind =
@@ -59,6 +68,13 @@ export interface RunResult<T = unknown> {
    * schema records what inside `data` so a human reading the output sees it.
    */
   salvage?: { detail: string; attempts: number };
+  /**
+   * What the agent's reviewOutput found in the draft that was returned. An
+   * empty array means the copy was checked and is clean. Absent means the
+   * agent declares no review, which is not the same thing, and callers that
+   * persist this should keep the distinction rather than defaulting to [].
+   */
+  tells?: AiTell[];
 }
 
 /**
@@ -131,6 +147,12 @@ export async function runAgent<T = unknown>(
     let failure: RunFailure | undefined;
     /** The last thing the model said, kept for the salvage parse below. */
     let lastText = '';
+    /**
+     * A draft that passed the schema but not the review, held back while the
+     * retry runs. It is what ships if the retry does worse: a message with a
+     * written-out "it is" beats no message, and the tells travel with it.
+     */
+    let flawed: { data: unknown; tells: AiTell[]; attempt: number } | undefined;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const started = Date.now();
@@ -141,15 +163,46 @@ export async function runAgent<T = unknown>(
       const outcome = parseOutput(def.outputSchema, text);
 
       if (outcome.ok) {
-        const runId = await logRun(db, {
+        // The schema says the shape is right. The review, where the agent
+        // declares one, says whether the copy is. undefined here means "not
+        // reviewed", which is logged as such rather than as zero tells.
+        const tells = def.reviewOutput?.(outcome.data);
+
+        if (!tells || tells.length === 0 || attempt === MAX_ATTEMPTS) {
+          const runId = await logRun(db, {
+            ...opts,
+            model: def.model,
+            usage,
+            started,
+            ok: true,
+            output: outcome.data,
+            tellCount: tells?.length ?? null,
+            error: tells?.length
+              ? `kept with ${countTells(tells)} after ${attempt} attempts: ${describeTells(tells)}`
+              : undefined,
+          });
+          return { ok: true, data: outcome.data as T, runId, tells };
+        }
+
+        // Valid but marked. Same treatment as a schema failure: the row is
+        // logged so a run of them shows the prompt needs work, and the model
+        // is shown exactly what it wrote and which rule it broke.
+        flawed = { data: outcome.data, tells, attempt };
+        await logRun(db, {
           ...opts,
           model: def.model,
           usage,
           started,
-          ok: true,
+          ok: false,
           output: outcome.data,
+          tellCount: tells.length,
+          error: `attempt ${attempt}/${MAX_ATTEMPTS} style_tells: ${describeTells(tells)}`,
         });
-        return { ok: true, data: outcome.data as T, runId };
+        messages.push(
+          { role: 'assistant', content: text.trim() },
+          { role: 'user', content: correctionForTells(tells) }
+        );
+        continue;
       }
 
       failure = {
@@ -181,6 +234,23 @@ export async function runAgent<T = unknown>(
       );
     }
 
+    // The retry was asked to fix the copy and broke the JSON instead. The
+    // draft it was fixing is still good, so that is what goes out, tells and
+    // all. No model call is made here, so the row logs zero tokens; the failed
+    // retry is already on the record above.
+    if (flawed) {
+      const runId = await logRun(db, {
+        ...opts,
+        model: def.model,
+        started: Date.now(),
+        ok: true,
+        output: flawed.data,
+        tellCount: flawed.tells.length,
+        error: `kept attempt ${flawed.attempt} with ${countTells(flawed.tells)}, retry ${failure?.kind ?? 'failed'}: ${failure?.detail ?? 'no detail'}`,
+      });
+      return { ok: true, data: flawed.data as T, runId, tells: flawed.tells };
+    }
+
     // Every retry is spent. If the agent declared a salvage schema, parse once
     // more with the unusable parts dropped: a review missing one instruction is
     // worth more to the person waiting for it than a 422. No model call is made
@@ -191,15 +261,24 @@ export async function runAgent<T = unknown>(
       if (salvaged.ok) {
         const detail = failure?.detail ?? 'no detail';
         const attempts = failure?.attempts ?? MAX_ATTEMPTS;
+        // No retry is left to spend on these, but they are still recorded.
+        const tells = def.reviewOutput?.(salvaged.data);
         const runId = await logRun(db, {
           ...opts,
           model: def.model,
           started: Date.now(),
           ok: true,
           output: salvaged.data,
+          tellCount: tells?.length ?? null,
           error: `salvaged after ${attempts} attempts: ${detail}`,
         });
-        return { ok: true, data: salvaged.data as T, runId, salvage: { detail, attempts } };
+        return {
+          ok: true,
+          data: salvaged.data as T,
+          runId,
+          salvage: { detail, attempts },
+          tells,
+        };
       }
     }
 
@@ -418,6 +497,31 @@ function correctionFor(outcome: Extract<ParseOutcome, { ok: false }>): string {
 Send the same answer again as a single JSON object, correcting only what the error above names. Do not add prose, an explanation, or markdown fences. Respect every character limit stated in your instructions: shorten the field rather than dropping it.`;
 }
 
+function countTells(tells: AiTell[]): string {
+  return `${tells.length} style tell${tells.length === 1 ? '' : 's'}`;
+}
+
+/** Tells as one quotable line, the way describeIssues does for schema errors. */
+function describeTells(tells: AiTell[]): string {
+  const shown = tells.slice(0, 6).map((tell) => `${tell.rule}: "${tell.found}"`);
+  const extra = tells.length > shown.length ? ` (+${tells.length - shown.length} more)` : '';
+  return shown.join('; ') + extra;
+}
+
+/**
+ * The style complaint. Unlike a schema error, fixing one tell can create
+ * another (dropping a question can leave the message with none), so the model
+ * is told to rewrite and re-check the whole message, not just the quoted text.
+ */
+function correctionForTells(tells: AiTell[]): string {
+  const list = tells.map((tell) => `- ${tell.rule}. Found: "${tell.found}"`).join('\n');
+
+  return `Your last response was valid JSON, but the copy breaks these rules from your instructions:
+${list}
+
+Rewrite the message so none of the above appear, then check the whole message against every style constraint again before you answer, because fixing one line can break another rule. Keep the same observation, the same idea, and the same closing question. Send the corrected answer as a single JSON object with the same fields. Do not add prose, an explanation, or markdown fences.`;
+}
+
 /**
  * Models wrap JSON in markdown fences or a sentence of preamble despite
  * instructions. Strip the fences, and if that still is not parseable, fall
@@ -548,6 +652,11 @@ async function logRun(
     /** Raw model text, kept on failures so a bad run is debuggable later. */
     rawText?: string;
     error?: string;
+    /**
+     * How many style tells the draft carried. null when the agent declares no
+     * review, so an unchecked run is never mistaken for a clean one.
+     */
+    tellCount?: number | null;
   }
 ): Promise<string | undefined> {
   const { data } = await db
@@ -563,6 +672,7 @@ async function logRun(
       ok: a.ok,
       error: a.error ?? null,
       raw_output: (a.output ?? a.rawText ?? null) as Json,
+      ai_tell_count: a.tellCount ?? null,
     })
     .select('id')
     .single();

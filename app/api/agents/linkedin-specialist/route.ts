@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { loadActiveIcp } from '@/lib/cadence/icp';
 import { runAgent, statusForFailure } from '@/lib/cadence/runtime';
 import { supabaseServer } from '@/lib/supabase/server';
+import type { Json } from '@/types/database';
 
 const bodySchema = z.object({
   workspaceId: z.string().uuid(),
@@ -79,6 +80,11 @@ export async function POST(request: Request) {
 
     const draft = run.data;
 
+    // The rules the draft still breaks after its retry, written onto the
+    // action so a human sees them before approving. [] is checked and clean;
+    // null is never checked, and the two must not be collapsed.
+    const aiTells = (run.tells ?? null) as Json;
+
     // Straight to the approval queue. A human sends this from their own
     // account, so there is no scheduled_for and no consent basis to record:
     // the constraint is platform terms, not consent.
@@ -91,6 +97,7 @@ export async function POST(request: Request) {
         channel: 'linkedin',
         subject: null,
         body: draft.body,
+        ai_tells: aiTells,
         status: 'awaiting_approval',
         step_number: stepNumber ?? null,
       })
@@ -104,7 +111,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
-      data: { actionId: action.id, status: 'awaiting_approval', draft },
+      data: { actionId: action.id, status: 'awaiting_approval', draft, aiTells },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown_error';

@@ -96,6 +96,7 @@ export default async function LeadsPage({
         <h1 className="text-3xl font-semibold tracking-tight">Leads</h1>
         <p className="text-muted-foreground">
           Sort by fit score, filter by stage, then run the Qualifier on a selection to score it.
+          Click a lead to read every message written for them.
         </p>
       </div>
 

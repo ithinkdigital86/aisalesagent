@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
+import { LeadThread } from './lead-thread';
 
 type Lead = {
   id: string;
@@ -74,6 +75,9 @@ export function LeadsTable({
   const [draftingLinkedIn, setDraftingLinkedIn] = React.useState(false);
   const [failures, setFailures] = React.useState<Failure[]>([]);
   const [failedRun, setFailedRun] = React.useState<string | null>(null);
+  /** The lead whose conversation is open for reading. Read-only. */
+  const [readingId, setReadingId] = React.useState<string | null>(null);
+  const closeThread = React.useCallback(() => setReadingId(null), []);
 
   const allSelected = leads.length > 0 && selected.size === leads.length;
   const byId = React.useMemo(() => new Map(leads.map((lead) => [lead.id, lead])), [leads]);
@@ -347,11 +351,13 @@ export function LeadsTable({
               {leads.map((lead) => (
                 <tr
                   key={lead.id}
-                  className={
+                  onClick={() => setReadingId(lead.id)}
+                  className={`cursor-pointer ${
                     failedIds.has(lead.id) ? 'bg-destructive/5 hover:bg-destructive/10' : 'hover:bg-muted/30'
-                  }
+                  }`}
                 >
-                  <td className="px-3 py-2">
+                  {/* Selecting is not reading, so the checkbox keeps the click. */}
+                  <td className="px-3 py-2" onClick={(event) => event.stopPropagation()}>
                     <input
                       type="checkbox"
                       checked={selected.has(lead.id)}
@@ -361,7 +367,16 @@ export function LeadsTable({
                     />
                   </td>
                   <td className="px-3 py-2">
-                    <div className="font-medium text-foreground">{lead.full_name ?? '-'}</div>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setReadingId(lead.id);
+                      }}
+                      className="text-left font-medium text-foreground underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                    >
+                      {lead.full_name ?? lead.company_name ?? 'Unnamed lead'}
+                    </button>
                     <div className="text-xs text-muted-foreground">{lead.company_name ?? '-'}</div>
                   </td>
                   <td className="px-3 py-2 text-muted-foreground">{lead.title ?? '-'}</td>
@@ -403,6 +418,14 @@ export function LeadsTable({
           </table>
         </div>
       )}
+
+      {readingId ? (
+        <LeadThread
+          leadId={readingId}
+          fallbackName={describeLead(byId.get(readingId), readingId)}
+          onClose={closeThread}
+        />
+      ) : null}
     </div>
   );
 }

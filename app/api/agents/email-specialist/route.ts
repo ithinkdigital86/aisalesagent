@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { loadActiveIcp } from '@/lib/cadence/icp';
 import { runAgent, statusForFailure } from '@/lib/cadence/runtime';
 import { supabaseServer } from '@/lib/supabase/server';
+import type { Json } from '@/types/database';
 
 const bodySchema = z.object({
   workspaceId: z.string().uuid(),
@@ -80,6 +81,11 @@ export async function POST(request: Request) {
     }
 
     const draft = run.data;
+
+    // The rules the draft still breaks after its retry, written onto the
+    // action so a human sees them before approving. [] is checked and clean;
+    // null is never checked, and the two must not be collapsed.
+    const aiTells = (run.tells ?? null) as Json;
     const scheduledFor = new Date(Date.now() + (delayHours ?? 0) * 3_600_000).toISOString();
 
     // Queue the draft. It does not send here.
@@ -92,6 +98,7 @@ export async function POST(request: Request) {
         channel: 'email',
         subject: draft.subject ?? null,
         body: draft.body,
+        ai_tells: aiTells,
         status: 'queued',
         scheduled_for: scheduledFor,
         sequence_id: sequenceId ?? null,
@@ -107,7 +114,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
-      data: { actionId: action.id, status: 'queued', scheduledFor, draft },
+      data: { actionId: action.id, status: 'queued', scheduledFor, draft, aiTells },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown_error';
