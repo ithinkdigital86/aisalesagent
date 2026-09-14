@@ -3,13 +3,19 @@
 // One function runs every agent. Context loading is driven by the agent's
 // declared `reads` scope, so an agent can never see more of the brain than
 // it asked for.
+//
+// Two providers, one runtime. The only thing that branches on the provider is
+// callModel below: the same context, the same JSON parse, the same schema
+// validation, the same corrective retry and the same agent_runs row apply
+// whichever API answered. Keep it that way. Anything that is not literally a
+// difference in the HTTP call does not belong behind that branch.
 
 import Anthropic from '@anthropic-ai/sdk';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { z } from 'zod';
 import type { Database, Json, Tables } from '@/types/database';
 import { describeIssues } from '@/lib/anthropic/schema';
-import { AGENTS, type AgentSlug, type ContextScope } from './registry';
+import { AGENTS, type AgentDefinition, type AgentSlug, type ContextScope } from './registry';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
@@ -21,7 +27,7 @@ export type RunFailureKind =
   | 'invalid_json'
   /** Valid JSON, but an essential field was missing or unusable. */
   | 'schema_mismatch'
-  /** The Anthropic call itself failed: rate limit, overload, bad key. */
+  /** The provider call itself failed: rate limit, overload, bad key. */
   | 'api_error'
   /** Anything else, usually a database read while assembling context. */
   | 'unknown';
@@ -121,7 +127,7 @@ export async function runAgent<T = unknown>(
     const context = await loadContext(db, def.reads, opts);
     const { system, user } = def.buildPrompt({ ...context, ...opts.extra });
 
-    const messages: Anthropic.MessageParam[] = [{ role: 'user', content: user }];
+    const messages: ChatMessage[] = [{ role: 'user', content: user }];
     let failure: RunFailure | undefined;
     /** The last thing the model said, kept for the salvage parse below. */
     let lastText = '';
@@ -129,17 +135,7 @@ export async function runAgent<T = unknown>(
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const started = Date.now();
       spent = attempt;
-      const response = await anthropic.messages.create({
-        model: def.model,
-        max_tokens: def.maxTokens,
-        system,
-        messages,
-      });
-
-      const text = response.content
-        .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-        .map((b) => b.text)
-        .join('\n');
+      const { text, usage } = await callModel(def, system, messages);
       lastText = text;
 
       const outcome = parseOutput(def.outputSchema, text);
@@ -148,7 +144,7 @@ export async function runAgent<T = unknown>(
         const runId = await logRun(db, {
           ...opts,
           model: def.model,
-          response,
+          usage,
           started,
           ok: true,
           output: outcome.data,
@@ -168,7 +164,7 @@ export async function runAgent<T = unknown>(
       await logRun(db, {
         ...opts,
         model: def.model,
-        response,
+        usage,
         started,
         ok: false,
         error: `attempt ${attempt}/${MAX_ATTEMPTS} ${outcome.kind}: ${outcome.detail}`,
@@ -214,7 +210,8 @@ export async function runAgent<T = unknown>(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : 'unknown_error';
-    const kind: RunFailureKind = err instanceof Anthropic.APIError ? 'api_error' : 'unknown';
+    const kind: RunFailureKind =
+      err instanceof Anthropic.APIError || err instanceof OpenAiApiError ? 'api_error' : 'unknown';
     await logRun(db, {
       ...opts,
       model: def.model,
@@ -244,6 +241,149 @@ export function statusForFailure(failure?: RunFailure): number {
     default:
       return 500;
   }
+}
+
+// ---------------------------------------------------------------
+// The provider call
+// ---------------------------------------------------------------
+
+/** One turn of the conversation, in the shape both providers understand. */
+type ChatMessage = { role: 'user' | 'assistant'; content: string };
+
+/** Token counts, named the same way whichever provider reported them. */
+export interface TokenUsage {
+  input: number;
+  output: number;
+}
+
+interface ModelReply {
+  /** The response text. Never null, but it can legitimately be empty. */
+  text: string;
+  usage: TokenUsage;
+}
+
+/**
+ * Any non-2xx from OpenAI, plus the missing-key case. It exists so the catch in
+ * runAgent can classify an OpenAI failure as api_error the same way it
+ * classifies Anthropic.APIError, rather than logging it as unknown.
+ */
+export class OpenAiApiError extends Error {
+  readonly status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.name = 'OpenAiApiError';
+    this.status = status;
+  }
+}
+
+/**
+ * The one place the provider matters. Both branches take the same arguments and
+ * return the same shape, so nothing downstream of here knows which API answered.
+ */
+async function callModel(
+  def: AgentDefinition,
+  system: string,
+  messages: ChatMessage[]
+): Promise<ModelReply> {
+  if (def.provider === 'openai') {
+    return callOpenAi(def.model, def.maxTokens, system, messages);
+  }
+  return callAnthropic(def.model, def.maxTokens, system, messages);
+}
+
+async function callAnthropic(
+  model: string,
+  maxTokens: number,
+  system: string,
+  messages: ChatMessage[]
+): Promise<ModelReply> {
+  const response = await anthropic.messages.create({
+    model,
+    max_tokens: maxTokens,
+    system,
+    messages,
+  });
+
+  const text = response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+
+  return {
+    text,
+    usage: { input: response.usage.input_tokens, output: response.usage.output_tokens },
+  };
+}
+
+const OPENAI_CHAT_URL = 'https://api.openai.com/v1/chat/completions';
+
+/** Only the parts of a chat completion this runtime reads. */
+interface OpenAiCompletion {
+  choices?: Array<{ message?: { content?: string | null }; finish_reason?: string }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  error?: { message?: string };
+}
+
+/**
+ * Chat completions over fetch. There is no OpenAI SDK in this project on
+ * purpose: one endpoint, one shape, and the rest of the runtime already does
+ * the parsing and the retrying.
+ */
+async function callOpenAi(
+  model: string,
+  maxTokens: number,
+  system: string,
+  messages: ChatMessage[]
+): Promise<ModelReply> {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new OpenAiApiError('OPENAI_API_KEY is not set');
+
+  const response = await fetch(OPENAI_CHAT_URL, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      // No top-level system field here: it is the first message instead.
+      messages: [{ role: 'system', content: system }, ...messages],
+      // Reasoning tokens are billed and count against this cap. These agents
+      // emit a small structured object, so a low effort is what keeps a 2048
+      // token budget from being spent thinking and returning nothing.
+      reasoning_effort: 'low',
+      max_completion_tokens: maxTokens,
+    }),
+  });
+
+  const payload = (await response.json().catch(() => null)) as OpenAiCompletion | null;
+
+  if (!response.ok) {
+    throw new OpenAiApiError(
+      `openai ${model}: ${payload?.error?.message ?? `HTTP ${response.status}`}`,
+      response.status
+    );
+  }
+
+  const choice = payload?.choices?.[0];
+  const text = choice?.message?.content ?? '';
+
+  // A model that spends the whole budget before writing anything returns an
+  // empty string. Reporting the cap beats an invalid_json failure on ''.
+  if (text.trim() === '' && choice?.finish_reason === 'length') {
+    throw new OpenAiApiError(
+      `openai ${model}: hit max_completion_tokens (${maxTokens}) before writing a reply`
+    );
+  }
+
+  return {
+    text,
+    usage: {
+      input: payload?.usage?.prompt_tokens ?? 0,
+      output: payload?.usage?.completion_tokens ?? 0,
+    },
+  };
 }
 
 type ParseOutcome =
@@ -402,7 +542,8 @@ async function logRun(
     model: string;
     started: number;
     ok: boolean;
-    response?: Anthropic.Message;
+    /** Absent when no model call was made, as on the salvage parse. */
+    usage?: TokenUsage;
     output?: unknown;
     /** Raw model text, kept on failures so a bad run is debuggable later. */
     rawText?: string;
@@ -416,8 +557,8 @@ async function logRun(
       agent: a.agent,
       lead_id: a.leadId ?? null,
       model: a.model,
-      input_tokens: a.response?.usage.input_tokens ?? 0,
-      output_tokens: a.response?.usage.output_tokens ?? 0,
+      input_tokens: a.usage?.input ?? 0,
+      output_tokens: a.usage?.output ?? 0,
       duration_ms: Date.now() - a.started,
       ok: a.ok,
       error: a.error ?? null,

@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { ensureWorkspace } from '@/app/actions/auth';
 import { RunButtons } from '@/components/dashboard/run-buttons';
 import { SignOutButton } from '@/components/auth/sign-out-button';
+import { costUsd } from '@/lib/cadence/pricing';
 import { supabaseServer } from '@/lib/supabase/server';
 
 const STAGE_ORDER = [
@@ -17,12 +18,6 @@ const STAGE_ORDER = [
   'lost',
   'suppressed',
 ];
-
-// Approximate USD per 1M tokens, for an at-a-glance spend estimate only.
-const PRICES: Record<string, { input: number; output: number }> = {
-  'claude-opus-5': { input: 15, output: 75 },
-  'claude-haiku-4-5-20251001': { input: 1, output: 5 },
-};
 
 type SalesManagerOutput = {
   headline?: string;
@@ -98,12 +93,14 @@ export default async function Home() {
     if (action.status === 'awaiting_approval') awaiting += 1;
   }
 
+  // Rates differ per provider, so the run's own model decides what it cost.
   let estimatedSpend = 0;
   for (const run of runs ?? []) {
-    const price = PRICES[run.model as string] ?? PRICES['claude-haiku-4-5-20251001'];
-    estimatedSpend +=
-      ((run.input_tokens as number) / 1_000_000) * price.input +
-      ((run.output_tokens as number) / 1_000_000) * price.output;
+    estimatedSpend += costUsd(
+      run.model as string,
+      run.input_tokens as number,
+      run.output_tokens as number
+    );
   }
 
   const manager = (sm?.raw_output ?? null) as SalesManagerOutput | null;

@@ -9,10 +9,10 @@ import { z } from 'zod';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import type { Database, Json } from '@/types/database';
-import { SIZE_BANDS, bandFor, sizeBandValues, type IcpFiltersShape } from './icp-shape';
+import { SIZE_BANDS, bandFor, sizeBandValues, type IcpFiltersShape } from './icp-shape.ts';
 
 export { SIZE_BANDS, bandFor, sizeBandValues };
-export type { IcpFiltersShape, SizeBand } from './icp-shape';
+export type { IcpFiltersShape, SizeBand } from './icp-shape.ts';
 
 /**
  * Runtime guard for the filters blob. Unknown keys are preserved by the form so

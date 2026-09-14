@@ -2,8 +2,8 @@
 
 import { z } from 'zod';
 
-import { advisoryInt, advisoryString } from '@/lib/anthropic/schema';
-import { describeIcp, type ActiveIcp } from '@/lib/cadence/icp';
+import { advisoryInt, advisoryString } from '../schema.ts';
+import { describeIcp, type ActiveIcp } from '../../cadence/icp.ts';
 
 /** Hard limits, stated in the prompt below so the model knows them. */
 export const LIMITS = {
@@ -58,6 +58,155 @@ export const outputSchema = essentialSchema.extend(advisoryShape).transform((dra
 function countWords(body: string): number {
   const words = body.trim().split(/\s+/).filter(Boolean);
   return words.length;
+}
+
+// ---------------------------------------------------------------
+// Anti-AI-tells
+// ---------------------------------------------------------------
+//
+// The lists below are the single source for both halves of the rule: they are
+// interpolated into the prompt text, and findAiTells checks a draft against the
+// same strings. Add a banned phrase in one place and both move together, the
+// way LIMITS already works for the length caps.
+//
+// These are tells, not taste. A prospect who has read fifty generated emails
+// this quarter recognises them faster than they read the sentence, and one of
+// them in the first line costs the reply regardless of how good the rest is.
+
+/** Openers that mark a message as machine-written before the second line. */
+export const BANNED_OPENERS = [
+  'I hope this email finds you well',
+  'I wanted to reach out',
+  'I came across your',
+  'quick question',
+] as const;
+
+/** Vocabulary and connective tissue that reads as generated prose. */
+export const BANNED_PHRASES = [
+  'delve',
+  'leverage',
+  'robust',
+  'seamless',
+  "in today's landscape",
+  "it's worth noting",
+  'that said',
+  'furthermore',
+  'moreover',
+] as const;
+
+/** Closings the appended signature already covers. */
+export const BANNED_SIGN_OFFS = [
+  'Looking forward to hearing from you',
+  'Best regards',
+] as const;
+
+/** One thing found in a draft that should not be there. */
+export interface AiTell {
+  /** Which rule was broken, phrased the way the prompt phrases it. */
+  rule: string;
+  /** The offending text, quoted back so a human can see it. */
+  found: string;
+}
+
+/**
+ * "A, B, and C" and "A, B and C" closing a sentence. Two items and a
+ * conjunction is a sentence; three is a pattern. It is anchored to the end of
+ * the sentence, and a salutation is taken off first, so an ordinary clause that
+ * happens to hold a comma and an "and" is not read as an enumeration.
+ */
+const RULE_OF_THREE =
+  /[^,.!?;:]{2,40},\s+[^,.!?;:]{2,40},?\s+and\s+[^,.!?;:]{2,40}[.!?]?$/i;
+
+const SALUTATION = /^(?:hi|hey|hello|dear)\b[^,]{0,30},\s*/i;
+
+/** "not just faster, but cheaper" and its variants. */
+const NOT_JUST_BUT = /\bnot (?:just|only)\b[^.!?]{0,80}\bbut\b/i;
+
+const DASHES = /[\u2014\u2013]/;
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * A phrase is present if it appears as written. Single words are matched on
+ * word boundaries so "leverage" is caught but "leveraged" in a quoted trigger
+ * headline is not a separate offence, and multi-word phrases are matched as
+ * substrings because that is how they are written.
+ */
+function contains(haystack: string, phrase: string): boolean {
+  const pattern = /\s/.test(phrase)
+    ? new RegExp(escapeRegExp(phrase), 'i')
+    : new RegExp(`\\b${escapeRegExp(phrase)}\\b`, 'i');
+  return pattern.test(haystack);
+}
+
+/** Sentences, near enough for counting and for finding the last one. */
+function sentences(body: string): string[] {
+  return body
+    .split(/(?<=[.!?])\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Every tell in a draft, or an empty array. This is what the tests assert on,
+ * and it is deliberately mechanical: it catches the strings and constructions
+ * the prompt bans outright, not the judgement calls beside them ("vary sentence
+ * length", "do not open two consecutive emails the same way") which need the
+ * rest of the sequence to assess.
+ */
+export function findAiTells(draft: { subject?: string; body: string }): AiTell[] {
+  const tells: AiTell[] = [];
+  const body = draft.body ?? '';
+  const all = [draft.subject ?? '', body].filter(Boolean).join('\n');
+
+  const dash = DASHES.exec(all);
+  if (dash) tells.push({ rule: 'no em dashes or en dashes', found: dash[0] });
+
+  for (const opener of BANNED_OPENERS) {
+    if (contains(all, opener)) tells.push({ rule: 'banned opener', found: opener });
+  }
+  for (const phrase of BANNED_PHRASES) {
+    if (contains(all, phrase)) tells.push({ rule: 'banned phrasing', found: phrase });
+  }
+  for (const signOff of BANNED_SIGN_OFFS) {
+    if (contains(all, signOff)) tells.push({ rule: 'no sign-off pleasantries', found: signOff });
+  }
+
+  const notJust = NOT_JUST_BUT.exec(all);
+  if (notJust) tells.push({ rule: 'no "not just X, but Y"', found: notJust[0] });
+
+  const parts = sentences(body);
+  const three = parts
+    .map((part) => RULE_OF_THREE.exec(part.replace(SALUTATION, '')))
+    .find((match): match is RegExpExecArray => match !== null);
+  if (three) tells.push({ rule: 'no rule-of-three lists', found: three[0].trim() });
+
+  // The one allowed question is the close, so a question anywhere before the
+  // final sentence is a transition dressed up as one.
+  for (const part of parts.slice(0, -1)) {
+    if (part.includes('?')) {
+      tells.push({ rule: 'no rhetorical questions as transitions', found: part });
+      break;
+    }
+  }
+
+  return tells;
+}
+
+/** The banned lists as the prompt states them, one rule per line. */
+function bannedRules(): string {
+  const quote = (items: readonly string[], last = ', ') => {
+    const quoted = items.map((item) => `"${item}"`);
+    return quoted.length < 2
+      ? quoted.join('')
+      : `${quoted.slice(0, -1).join(', ')}${last}${quoted[quoted.length - 1]}`;
+  };
+  return `- No em dashes or en dashes anywhere. Use commas, full stops, or separate sentences.
+- Never open with any of these: ${quote(BANNED_OPENERS)}.
+- Never use any of these: ${quote(BANNED_PHRASES)}.
+- No sign-off pleasantries: not ${quote(BANNED_SIGN_OFFS, ' or ')}, and not any variant of them. The signature is appended separately, so the message ends on your question.`;
 }
 
 const CHANNEL_RULES: Record<string, string> = {
@@ -123,11 +272,17 @@ How you close:
 - One question. It should be easy to answer and should lead toward a conversation, not a purchase.
 - Never ask for a meeting in the first message on any channel.
 
-Style constraints:
-- No em dashes or long dashes anywhere. Use commas, colons, or separate sentences.
-- No exclamation marks. No "I hope this finds you well". No "quick question". No "just following up". No "circling back". No "synergy", "leverage", "unlock", "game-changer", "revolutionise".
+Style constraints. These are what separate a message a person wrote from one a machine assembled, and a prospect who has read fifty generated emails this quarter spots the difference in the first line:
+${bannedRules()}
+- No exclamation marks. No "I hope this finds you well". No "just following up". No "circling back". No "synergy", "unlock", "game-changer", "revolutionise".
+- No "not just X, but Y" constructions, in any wording.
+- No rule-of-three lists. Two examples make a point, three make a slogan.
+- No rhetorical questions used as transitions. You get one question, it goes at the end, and you want it answered literally.
+- Vary sentence length on purpose. Put a short one after a long one. Even rhythm is the tell that nobody can name but everybody hears.
+- Contractions are fine and preferred. Write how a person types, not how a person writes a report.
 - Write at a plain reading level. Short sentences beat clever ones.
 - Do not use the recipient's first name more than once.
+- Never open two consecutive messages in a sequence the same way. Read what was already sent, further down, before you write the first line: if the last one opened on an observation about their hiring, this one does not, and reusing the first few words of an earlier opener is the same mistake in a thinner disguise.
 
 Channel rules for this message:
 ${CHANNEL_RULES[channel] ?? CHANNEL_RULES.email}

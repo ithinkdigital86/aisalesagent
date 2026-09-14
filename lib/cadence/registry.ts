@@ -24,11 +24,29 @@ export type ContextScope =
   | 'agent_memory'
   | 'pipeline_summary';
 
-export interface AgentDefinition {
+/** Which API the call goes to. Only the call itself branches on this. */
+export type Provider = 'anthropic' | 'openai';
+
+/**
+ * Provider and model travel together so an agent cannot name a model its
+ * provider does not serve. Adding a model means adding it here and to the rate
+ * table in ./pricing, or the run logs a cost of zero.
+ */
+export type ModelChoice =
+  | {
+      provider: 'anthropic';
+      /** Opus for judgement and copy, Haiku for classification and routing. */
+      model: 'claude-opus-5' | 'claude-haiku-4-5-20251001';
+    }
+  | {
+      provider: 'openai';
+      /** gpt-5 for copy, gpt-5-mini where the job is closer to routing. */
+      model: 'gpt-5' | 'gpt-5-mini';
+    };
+
+export type AgentDefinition = ModelChoice & {
   slug: AgentSlug;
   label: string;
-  /** Opus for judgement and copy, Haiku for classification and routing. */
-  model: 'claude-opus-5' | 'claude-haiku-4-5-20251001';
   maxTokens: number;
   reads: ContextScope[];
   /** Channels this agent may produce actions on. Empty = writes no actions. */
@@ -42,13 +60,14 @@ export interface AgentDefinition {
    * unset for agents whose output is worthless in part.
    */
   salvageSchema?: z.ZodTypeAny;
-}
+};
 
 export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   qualifier: {
     slug: 'qualifier',
     label: 'Qualifier',
     // Scoring against explicit criteria is classification, not creative work.
+    provider: 'anthropic',
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 1024,
     reads: ['lead', 'lead_triggers', 'agent_memory'],
@@ -60,7 +79,8 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   content_creator: {
     slug: 'content_creator',
     label: 'Content creator',
-    model: 'claude-opus-5',
+    provider: 'openai',
+    model: 'gpt-5',
     maxTokens: 2048,
     reads: ['lead', 'lead_triggers', 'action_history', 'agent_memory'],
     writesChannels: [],
@@ -71,6 +91,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   follow_up: {
     slug: 'follow_up',
     label: 'Follow-up manager',
+    provider: 'anthropic',
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 1024,
     reads: ['lead', 'action_history', 'sequence', 'consent'],
@@ -82,6 +103,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   sales_manager: {
     slug: 'sales_manager',
     label: 'Sales manager',
+    provider: 'anthropic',
     model: 'claude-opus-5',
     maxTokens: 4096,
     reads: ['pipeline_summary', 'agent_memory'],
@@ -99,7 +121,8 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   email_specialist: {
     slug: 'email_specialist',
     label: 'Email specialist',
-    model: 'claude-opus-5',
+    provider: 'openai',
+    model: 'gpt-5',
     maxTokens: 2048,
     reads: ['lead', 'lead_triggers', 'action_history', 'agent_memory'],
     writesChannels: ['email'],
@@ -110,6 +133,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   linkedin_specialist: {
     slug: 'linkedin_specialist',
     label: 'LinkedIn specialist',
+    provider: 'anthropic',
     model: 'claude-opus-5',
     maxTokens: 1024,
     reads: ['lead', 'lead_triggers', 'action_history', 'agent_memory'],
@@ -121,6 +145,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   instagram_specialist: {
     slug: 'instagram_specialist',
     label: 'Instagram specialist',
+    provider: 'anthropic',
     model: 'claude-opus-5',
     maxTokens: 1024,
     reads: ['lead', 'action_history', 'agent_memory'],
@@ -132,6 +157,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   voice_specialist: {
     slug: 'voice_specialist',
     label: 'Voice specialist',
+    provider: 'anthropic',
     model: 'claude-opus-5',
     maxTokens: 2048,
     reads: ['lead', 'lead_triggers', 'action_history', 'consent'],
@@ -143,6 +169,7 @@ export const AGENTS: Record<AgentSlug, AgentDefinition> = {
   sourcing_scout: {
     slug: 'sourcing_scout',
     label: 'Sourcing scout',
+    provider: 'anthropic',
     model: 'claude-haiku-4-5-20251001',
     maxTokens: 2048,
     reads: ['agent_memory'],
