@@ -227,6 +227,8 @@ export type Database = {
       };
       consent_records: {
         Row: {
+          attested_at: string | null;
+          attested_by: string | null;
           basis: Database['public']['Enums']['consent_basis'];
           captured_at: string;
           channels: Database['public']['Enums']['channel'][];
@@ -240,6 +242,8 @@ export type Database = {
           workspace_id: string;
         };
         Insert: {
+          attested_at?: string | null;
+          attested_by?: string | null;
           basis: Database['public']['Enums']['consent_basis'];
           captured_at?: string;
           channels: Database['public']['Enums']['channel'][];
@@ -253,6 +257,8 @@ export type Database = {
           workspace_id: string;
         };
         Update: {
+          attested_at?: string | null;
+          attested_by?: string | null;
           basis?: Database['public']['Enums']['consent_basis'];
           captured_at?: string;
           channels?: Database['public']['Enums']['channel'][];
@@ -266,6 +272,13 @@ export type Database = {
           workspace_id?: string;
         };
         Relationships: [
+          {
+            foreignKeyName: 'consent_records_attested_by_fkey';
+            columns: ['attested_by'];
+            isOneToOne: false;
+            referencedRelation: 'users';
+            referencedColumns: ['id'];
+          },
           {
             foreignKeyName: 'consent_records_lead_id_fkey';
             columns: ['lead_id'];
@@ -428,6 +441,8 @@ export type Database = {
           phone: string | null;
           raw: Json;
           seniority: string | null;
+          source: string | null;
+          source_record_id: string | null;
           sourcing_run_id: string | null;
           stage: Database['public']['Enums']['lead_stage'];
           timezone: string | null;
@@ -458,6 +473,8 @@ export type Database = {
           phone?: string | null;
           raw?: Json;
           seniority?: string | null;
+          source?: string | null;
+          source_record_id?: string | null;
           sourcing_run_id?: string | null;
           stage?: Database['public']['Enums']['lead_stage'];
           timezone?: string | null;
@@ -488,6 +505,8 @@ export type Database = {
           phone?: string | null;
           raw?: Json;
           seniority?: string | null;
+          source?: string | null;
+          source_record_id?: string | null;
           sourcing_run_id?: string | null;
           stage?: Database['public']['Enums']['lead_stage'];
           timezone?: string | null;

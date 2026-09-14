@@ -2,7 +2,14 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 import { supabaseServer } from '@/lib/supabase/server';
+import { CsvImport } from './csv-import';
 import { SourcingForm } from './sourcing-form';
+
+/** How a run's source reads in the recent runs list. */
+const SOURCE_LABELS: Record<string, string> = {
+  apollo: 'Apollo',
+  csv_import: 'CSV import',
+};
 
 export default async function SourcingPage() {
   const db = await supabaseServer();
@@ -22,7 +29,7 @@ export default async function SourcingPage() {
   const { data: runs } = await db
     .from('sourcing_runs')
     .select(
-      'id, returned_count, inserted_count, duplicate_count, suppressed_count, credits_used, error, created_at'
+      'id, source, returned_count, inserted_count, duplicate_count, suppressed_count, credits_used, error, created_at'
     )
     .eq('workspace_id', workspace.id)
     .order('created_at', { ascending: false })
@@ -43,15 +50,17 @@ export default async function SourcingPage() {
       </header>
 
       <div className="space-y-2">
-        <h1 className="text-3xl font-semibold tracking-tight">Source leads from Apollo</h1>
+        <h1 className="text-3xl font-semibold tracking-tight">Source leads</h1>
         <p className="text-muted-foreground">
-          Define an ideal customer profile and run it. Every result passes the enrich and dedupe
-          gate before it becomes a lead, and an identical search inside the cache window spends no
-          Apollo credits.
+          Search Apollo against an ideal customer profile, or import a CSV you already have.
+          Either way every result passes the enrich and dedupe gate before it becomes a lead, and
+          an identical Apollo search inside the cache window spends no credits.
         </p>
       </div>
 
       <SourcingForm workspaceId={workspace.id} />
+
+      <CsvImport workspaceId={workspace.id} />
 
       {runs && runs.length > 0 ? (
         <section className="space-y-3">
@@ -62,8 +71,13 @@ export default async function SourcingPage() {
                 key={run.id}
                 className="flex items-center justify-between gap-4 px-4 py-3 text-sm"
               >
-                <span className="font-mono text-xs text-muted-foreground">
-                  {new Date(run.created_at).toLocaleString()}
+                <span className="flex flex-col">
+                  <span className="font-mono text-xs text-muted-foreground">
+                    {new Date(run.created_at).toLocaleString()}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {SOURCE_LABELS[run.source] ?? run.source}
+                  </span>
                 </span>
                 <span className="text-right">
                   {run.error ? (
