@@ -2,6 +2,13 @@
 //
 // Runs every 6 hours. Reads every lead that is due, asks the Follow-up
 // manager what to do, and applies the decision.
+//
+// Leads on a running sequence are skipped: the sequence runner owns their
+// next_action_at, and two schedulers writing the same column is how a lead
+// ends up with a step silently rescheduled out from under it. Once a run
+// stops — a reply, an unsubscribe, the last step — sequence_stopped_reason is
+// set and the lead comes back here, which is what makes a reply land with the
+// manager that knows how to read one.
 
 import { NextResponse } from 'next/server';
 import { supabaseService } from '@/lib/supabase/server';
@@ -22,6 +29,7 @@ export async function GET(request: Request) {
     .select('id, workspace_id')
     .lte('next_action_at', new Date().toISOString())
     .in('stage', ['contacted', 'engaged'])
+    .or('assigned_sequence_id.is.null,sequence_stopped_reason.not.is.null')
     .limit(100);
 
   const handled = [];

@@ -586,6 +586,8 @@ export type Database = {
           phone: string | null;
           raw: Json;
           seniority: string | null;
+          sequence_step: number;
+          sequence_stopped_reason: string | null;
           source: string | null;
           source_record_id: string | null;
           sourcing_run_id: string | null;
@@ -618,6 +620,8 @@ export type Database = {
           phone?: string | null;
           raw?: Json;
           seniority?: string | null;
+          sequence_step?: number;
+          sequence_stopped_reason?: string | null;
           source?: string | null;
           source_record_id?: string | null;
           sourcing_run_id?: string | null;
@@ -650,6 +654,8 @@ export type Database = {
           phone?: string | null;
           raw?: Json;
           seniority?: string | null;
+          sequence_step?: number;
+          sequence_stopped_reason?: string | null;
           source?: string | null;
           source_record_id?: string | null;
           sourcing_run_id?: string | null;

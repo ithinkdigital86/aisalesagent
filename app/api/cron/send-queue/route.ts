@@ -1,11 +1,18 @@
 // app/api/cron/send-queue/route.ts
 //
-// Runs frequently. Picks up queued email actions whose scheduled_for has
-// passed, re-runs the consent gate on each, sends, and updates the row.
+// Runs frequently. Two passes, in this order:
+//
+//  1. Sequences. Every lead whose next step is due gets that step drafted and
+//     queued, or its run stopped. This goes first so a step queued now is
+//     delivered by the pass below on the same tick rather than the next one.
+//
+//  2. Delivery. Queued email actions whose scheduled_for has passed: the
+//     consent gate is re-run on each, then it sends, then the row is updated.
 
 import { NextResponse } from 'next/server';
 
 import { deliverQueuedEmailAction } from '@/lib/cadence/adapters/email';
+import { runDueSequenceSteps } from '@/lib/cadence/sequence-runner';
 import { supabaseService } from '@/lib/supabase/server';
 
 export const maxDuration = 300;
@@ -16,6 +23,8 @@ export async function GET(request: Request) {
   }
 
   const db = supabaseService();
+
+  const sequences = await runDueSequenceSteps(db);
 
   const { data: due } = await db
     .from('actions')
@@ -32,5 +41,5 @@ export async function GET(request: Request) {
     handled.push({ id: action.id, status: result.status });
   }
 
-  return NextResponse.json({ processed: handled.length, handled });
+  return NextResponse.json({ sequences, processed: handled.length, handled });
 }

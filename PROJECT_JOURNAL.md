@@ -309,3 +309,47 @@ so far. Pricing model is not guessed; it stays manual.
 and `npm run build`. Not yet clicked through against a live JS-only site;
 that is the next thing to do, and the migration has to be run in Supabase
 first.
+
+### 2026-10-13 Sequences QA: hydration mismatch and stale lists
+
+**Problem.** Browser QA of the sequences work found two things. The due date
+in the leads table and on the sequences page was formatted with
+`toLocaleDateString`, so the server rendered "16 Oct" and the browser "Oct 16"
+and React threw *Hydration failed* on every load of either page with an
+enrolled lead. Separately, saving a new sequence and putting a lead on one
+both showed a success toast while the page kept the old rows until a manual
+reload.
+
+**Change.** One formatter, `formatDueDate()` in `lib/cadence/sequence.ts`,
+used by both tables. It shows the day as it falls in a fixed named zone,
+`DISPLAY_TIME_ZONE = 'Asia/Kolkata'`, so the server and the browser produce
+the same text and it is the right local day for an Indian workspace. Intl
+supplies only the numeric day, month and year in that zone; the month names
+are a fixed list, because ICU versions disagree on some of them (en-GB is
+"Sept" in newer data) and the server's Node and the browser's ICU need not
+match. The zone is an option, so when a workspace's jurisdiction should
+decide it, read it from `workspaces.jurisdictions` and pass it in.
+
+**Stale lists: no code change.** Every sequences action already calls
+`revalidatePath('/sequences')` and `revalidatePath('/leads')`, and both
+components call `router.refresh()` after a successful write. Re-run in the
+browser on the fixed tree, both reported paths (create a sequence; enrol a
+lead from /leads) showed the new row without a reload, with the action
+response carrying `x-action-revalidated` and a refresh request following it.
+Accepted cause: the hydration mismatch was breaking the client tree, so the
+revalidated payload was not reliably rendering. Not proved: in the same
+session a `router.refresh()` did apply on a page that had just failed
+hydration, and the create case was reported from zero sequences, where no
+dated row is rendered and so no mismatch can happen. If it comes back, that
+is where to look.
+
+**Also learned.** Stopping `npm run dev` from a background task can leave the
+Next server process running; a build then overwrites `.next` under it and a
+second `npm run dev` comes up on 3001. Check port 3000 is free before
+restarting.
+
+**Verification.** `tsc`, `npm test` (187 passing; the formatter tests also
+pass with `TZ=America/Los_Angeles`) and `npm run build`. Both pages reloaded
+in the browser with no hydration error. The repro sequence and enrolment
+made during QA were removed; the QA LinkedIn sequence and Neha Bhatt's
+enrolment were left as they were.

@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
 import { loadActiveIcp } from '@/lib/cadence/icp';
+import { parseSteps } from '@/lib/cadence/sequence';
 import { supabaseServer } from '@/lib/supabase/server';
 import { LeadsTable } from './leads-table';
 
@@ -48,7 +49,7 @@ export default async function LeadsPage({
   let query = db
     .from('leads')
     .select(
-      'id, full_name, company_name, title, stage, fit_score, fit_reasoning, email, icp_profile_id, icp:icp_profiles(name, active)'
+      'id, full_name, company_name, title, stage, fit_score, fit_reasoning, email, icp_profile_id, icp:icp_profiles(name, active), assigned_sequence_id, sequence_step, sequence_stopped_reason, next_action_at, sequence:sequences(name, steps)'
     )
     .eq('workspace_id', workspace.id);
   if (stage !== 'all') query = query.eq('stage', stage);
@@ -58,11 +59,28 @@ export default async function LeadsPage({
 
   const activeIcp = await loadActiveIcp(db, workspace.id);
 
+  // Only sequences that can actually take a lead are offered for assignment.
+  const { data: sequences } = await db
+    .from('sequences')
+    .select('id, name, steps')
+    .eq('workspace_id', workspace.id)
+    .eq('active', true)
+    .order('created_at', { ascending: true });
+
+  const assignable = (sequences ?? [])
+    .map((sequence) => ({
+      id: sequence.id,
+      name: sequence.name,
+      stepCount: parseSteps(sequence.steps).length,
+    }))
+    .filter((sequence) => sequence.stepCount > 0);
+
   // The join comes back as an object or a one-element array depending on how
   // PostgREST resolves the relationship, so flatten it once here rather than in
   // the table.
   const rows = (leads ?? []).map((lead) => {
     const joined = Array.isArray(lead.icp) ? lead.icp[0] : lead.icp;
+    const sequence = Array.isArray(lead.sequence) ? lead.sequence[0] : lead.sequence;
     return {
       id: lead.id,
       full_name: lead.full_name,
@@ -75,6 +93,12 @@ export default async function LeadsPage({
       icp_name: joined?.name ?? null,
       /** A score made against a profile that is no longer the active one. */
       icp_stale: joined ? joined.active !== true : false,
+      sequence_id: lead.assigned_sequence_id,
+      sequence_name: sequence?.name ?? null,
+      sequence_steps: sequence ? parseSteps(sequence.steps).length : 0,
+      sequence_step: lead.sequence_step,
+      sequence_stopped_reason: lead.sequence_stopped_reason,
+      next_action_at: lead.next_action_at,
     };
   });
 
@@ -96,7 +120,8 @@ export default async function LeadsPage({
         <h1 className="text-3xl font-semibold tracking-tight">Leads</h1>
         <p className="text-muted-foreground">
           Sort by fit score, filter by stage, then run the Qualifier on a selection to score it.
-          Click a lead to read every message written for them.
+          Put a selection on a sequence to have the send queue work through its steps. Click a
+          lead to read every message written for them.
         </p>
       </div>
 
@@ -120,7 +145,13 @@ export default async function LeadsPage({
         </div>
       )}
 
-      <LeadsTable workspaceId={workspace.id} leads={rows} stage={stage} sort={sort} />
+      <LeadsTable
+        workspaceId={workspace.id}
+        leads={rows}
+        sequences={assignable}
+        stage={stage}
+        sort={sort}
+      />
     </main>
   );
 }

@@ -5,7 +5,9 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 
+import { enrolLeads } from '@/app/actions/sequences';
 import { Button } from '@/components/ui/button';
+import { describeStop, formatDueDate } from '@/lib/cadence/sequence';
 import { LeadThread } from './lead-thread';
 
 type Lead = {
@@ -21,7 +23,20 @@ type Lead = {
   icp_name: string | null;
   /** That profile is no longer the workspace's active one. */
   icp_stale: boolean;
+  /** The sequence this lead is on, null when it is on none. */
+  sequence_id: string | null;
+  sequence_name: string | null;
+  /** How many steps that sequence has, for "step 2 of 3". */
+  sequence_steps: number;
+  /** The highest step already queued. 0 means enrolled, nothing sent yet. */
+  sequence_step: number;
+  /** Why the run ended, null while it is still running. */
+  sequence_stopped_reason: string | null;
+  next_action_at: string | null;
 };
+
+/** An active sequence with at least one step, so it can take a lead. */
+type AssignableSequence = { id: string; name: string; stepCount: number };
 
 const STAGES = [
   'sourced',
@@ -60,11 +75,13 @@ function reasonFrom(payload: unknown, fallback: string): string {
 export function LeadsTable({
   workspaceId,
   leads,
+  sequences,
   stage,
   sort,
 }: {
   workspaceId: string;
   leads: Lead[];
+  sequences: AssignableSequence[];
   stage: string;
   sort: 'fit_asc' | 'fit_desc';
 }) {
@@ -73,6 +90,8 @@ export function LeadsTable({
   const [pending, setPending] = React.useState(false);
   const [drafting, setDrafting] = React.useState(false);
   const [draftingLinkedIn, setDraftingLinkedIn] = React.useState(false);
+  const [assigning, setAssigning] = React.useState(false);
+  const [sequenceId, setSequenceId] = React.useState(sequences[0]?.id ?? '');
   const [failures, setFailures] = React.useState<Failure[]>([]);
   const [failedRun, setFailedRun] = React.useState<string | null>(null);
   /** The lead whose conversation is open for reading. Read-only. */
@@ -237,7 +256,46 @@ export function LeadsTable({
       setBusy: setDraftingLinkedIn,
     });
 
-  const busy = pending || drafting || draftingLinkedIn;
+  /**
+   * Put the selection on a sequence. The action refuses leads that a sequence
+   * would only stop again on its first look — suppressed, won, lost, meeting
+   * booked — and names them rather than dropping them quietly.
+   */
+  async function assignSequence() {
+    const leadIds = [...selected];
+    if (leadIds.length === 0 || !sequenceId) return;
+
+    setAssigning(true);
+    try {
+      const result = await enrolLeads({ workspaceId, sequenceId, leadIds });
+      const skipped = result.skipped ?? [];
+      const found: Failure[] = skipped.map((entry) => ({
+        leadId: entry.leadId,
+        label: describeLead(byId.get(entry.leadId), entry.leadId),
+        reason: entry.reason,
+      }));
+
+      if (!result.ok) {
+        setFailures(found);
+        setFailedRun(found.length > 0 ? 'Assign to sequence' : null);
+        toast.error(result.error ?? 'Could not assign the sequence');
+        return;
+      }
+
+      report(
+        'Assign to sequence',
+        found,
+        leadIds.length,
+        'The send queue picks up step one on its next run.'
+      );
+      setSelected(new Set());
+      router.refresh();
+    } finally {
+      setAssigning(false);
+    }
+  }
+
+  const busy = pending || drafting || draftingLinkedIn || assigning;
 
   return (
     <div className="flex flex-col gap-4">
@@ -265,6 +323,38 @@ export function LeadsTable({
         >
           Fit score {sort === 'fit_desc' ? 'high to low' : 'low to high'}
         </Button>
+
+        {sequences.length > 0 ? (
+          <div className="flex items-center gap-2">
+            <select
+              value={sequenceId}
+              onChange={(event) => setSequenceId(event.target.value)}
+              aria-label="Sequence to assign"
+              className="h-9 rounded-md border border-input bg-transparent px-3 text-sm text-foreground shadow-xs outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px]"
+            >
+              {sequences.map((sequence) => (
+                <option key={sequence.id} value={sequence.id}>
+                  {sequence.name} ({sequence.stepCount} step{sequence.stepCount === 1 ? '' : 's'})
+                </option>
+              ))}
+            </select>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || selected.size === 0}
+              onClick={assignSequence}
+            >
+              {assigning ? 'Assigning' : 'Put on sequence'}
+            </Button>
+          </div>
+        ) : (
+          <Link
+            href="/sequences"
+            className="text-sm text-muted-foreground underline underline-offset-4"
+          >
+            Create a sequence
+          </Link>
+        )}
 
         <div className="ml-auto flex items-center gap-3">
           <span className="text-sm text-muted-foreground">{selected.size} selected</span>
@@ -343,6 +433,7 @@ export function LeadsTable({
                 <th className="px-3 py-2 font-medium">Title</th>
                 <th className="px-3 py-2 font-medium">Stage</th>
                 <th className="px-3 py-2 font-medium">Fit</th>
+                <th className="px-3 py-2 font-medium">Sequence</th>
                 <th className="px-3 py-2 font-medium">Scored against</th>
                 <th className="px-3 py-2 font-medium">Reasoning</th>
               </tr>
@@ -386,6 +477,23 @@ export function LeadsTable({
                     </span>
                   </td>
                   <td className="px-3 py-2 font-mono">{lead.fit_score ?? '-'}</td>
+                  <td className="px-3 py-2">
+                    {lead.sequence_name ? (
+                      <div className="max-w-[12rem]">
+                        <div className="truncate text-xs text-foreground" title={lead.sequence_name}>
+                          {lead.sequence_name}
+                        </div>
+                        <div className="font-mono text-[10px] text-muted-foreground">
+                          step {lead.sequence_step} of {lead.sequence_steps} ·{' '}
+                          {lead.sequence_stopped_reason
+                            ? describeStop(lead.sequence_stopped_reason)
+                            : `next ${formatDueDate(lead.next_action_at)}`}
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">-</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2">
                     {lead.icp_name ? (
                       <span

@@ -3,11 +3,16 @@
 // User-triggered version of the send queue, scoped to the caller's workspace.
 // This is what the dashboard "Process send queue" button calls, so the queue
 // can run on demand without a cron (useful on plans without frequent crons).
+//
+// It makes the same two passes as the cron, in the same order: due sequence
+// steps first, so a step that becomes due now is queued and then delivered on
+// this one request, and the delivery loop second.
 
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
 import { deliverQueuedEmailAction } from '@/lib/cadence/adapters/email';
+import { runDueSequenceSteps } from '@/lib/cadence/sequence-runner';
 import { supabaseServer, supabaseService } from '@/lib/supabase/server';
 
 const bodySchema = z.object({ workspaceId: z.string().uuid() });
@@ -36,6 +41,9 @@ export async function POST(request: Request) {
     if (!ws) return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });
 
     const service = supabaseService();
+
+    const sequences = await runDueSequenceSteps(service, { workspaceId });
+
     const { data: due } = await service
       .from('actions')
       .select('id, workspace_id, lead_id, subject, body')
@@ -57,7 +65,19 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({
-      data: { processed: due?.length ?? 0, sent, blocked, failed },
+      data: {
+        processed: due?.length ?? 0,
+        sent,
+        blocked,
+        failed,
+        sequenceSteps: {
+          due: sequences.due,
+          queued: sequences.queued,
+          stopped: sequences.stopped,
+          deferred: sequences.deferred,
+          failed: sequences.failed,
+        },
+      },
     });
   } catch (err) {
     return NextResponse.json(

@@ -135,6 +135,7 @@ export default async function Home() {
           { href: '/icp', label: 'ICP' },
           { href: '/sourcing', label: 'Sourcing' },
           { href: '/leads', label: 'Leads' },
+          { href: '/sequences', label: 'Sequences' },
           { href: '/approvals', label: `Approvals${awaiting ? ` (${awaiting})` : ''}` },
         ].map((item) => (
           <Link
