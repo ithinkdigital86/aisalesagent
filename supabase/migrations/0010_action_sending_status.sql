@@ -1,0 +1,22 @@
+-- supabase/migrations/0010_action_sending_status.sql
+-- A claim state for email actions, so one row is sent once.
+--
+-- The cron and the dashboard's "Process send queue" button both select
+-- queued, due email actions and send each one. Nothing marked a row as taken,
+-- so two passes that overlapped (a cron tick while someone pressed the
+-- button, or a slow cron tick overlapping the next) both sent the same email.
+--
+-- A sender now moves the row from 'queued' to 'sending' with an update that
+-- only matches while it is still 'queued', and sends only when that update
+-- returned the row. The second pass's update matches nothing and it moves on.
+-- The action id also goes to Resend as an Idempotency-Key, which covers a
+-- retry of the same row inside Resend's window.
+--
+-- A row left in 'sending' means the process stopped between the claim and
+-- the result. It is deliberately not picked up again: whether that email went
+-- out is unknown, and resending is the failure this exists to prevent.
+--
+-- Its own file because a value added by ALTER TYPE cannot be used in the
+-- transaction that adds it.
+
+alter type action_status add value if not exists 'sending' after 'queued';

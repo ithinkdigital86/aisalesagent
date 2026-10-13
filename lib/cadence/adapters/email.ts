@@ -8,7 +8,8 @@
 import crypto from 'node:crypto';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-import { evaluateConsent } from '@/lib/cadence/consent';
+// Relative, with the extension, so node --test can load this module directly.
+import { evaluateConsent } from '../consent.ts';
 import type { Enums } from '@/types/database';
 
 const RESEND_ENDPOINT = 'https://api.resend.com/emails';
@@ -28,7 +29,9 @@ export type SendEmailResult =
   | { status: 'sent'; actionId: string | null; providerMessageId: string | null }
   | { status: 'awaiting_approval'; actionId: string | null }
   | { status: 'blocked'; actionId: string | null; reason: string }
-  | { status: 'failed'; actionId: string | null; error: string };
+  | { status: 'failed'; actionId: string | null; error: string }
+  /** Another pass claimed the row first, so this one sent nothing. */
+  | { status: 'skipped'; actionId: string; reason: 'already_claimed' };
 
 /** Shape of a queued email action the send queue hands to the adapter. */
 export interface QueuedEmailAction {
@@ -96,18 +99,27 @@ function withUnsubscribe(body: string, url: string): string {
   return `${body}\n\nUnsubscribe: ${url}`;
 }
 
-/** The single place the network call to Resend happens. */
+/**
+ * The single place the network call to Resend happens.
+ *
+ * idempotencyKey is the action id. Resend answers a repeat of the same key
+ * with the original result instead of sending again, which backs up the claim
+ * in deliverQueuedEmailAction for the case the claim cannot see: the same row
+ * sent twice by one caller, for instance a retry after a timeout.
+ */
 async function postToResend(params: {
   to: string;
   subject: string;
   text: string;
   listUnsubscribe: string;
+  idempotencyKey: string;
 }): Promise<{ ok: true; id: string | null } | { ok: false; error: string }> {
   const response = await fetch(RESEND_ENDPOINT, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${process.env.RESEND_API_KEY!}`,
+      'Idempotency-Key': params.idempotencyKey,
     },
     body: JSON.stringify({
       from: process.env.EMAIL_FROM!,
@@ -195,7 +207,9 @@ export async function sendEmail(
   const bodyWithUnsub = withUnsubscribe(input.body, url);
 
   // 3. Record the actions row with the returned consent_basis BEFORE sending.
-  const status: Enums<'action_status'> = verdict.requiresApproval ? 'awaiting_approval' : 'queued';
+  // A row about to be sent here is written as 'sending', already claimed, so
+  // the send queue never picks it up as 'queued' while this call is sending.
+  const status: Enums<'action_status'> = verdict.requiresApproval ? 'awaiting_approval' : 'sending';
   const { data: action } = await db
     .from('actions')
     .insert({ ...base, body: bodyWithUnsub, status, consent_basis: verdict.basis })
@@ -208,9 +222,20 @@ export async function sendEmail(
     return { status: 'awaiting_approval', actionId };
   }
 
+  // No row means no record of the send and no idempotency key, so no send.
+  if (!actionId) {
+    return { status: 'failed', actionId: null, error: 'action_insert_failed' };
+  }
+
   // 5. Send.
   try {
-    const sent = await postToResend({ to: email, subject, text: bodyWithUnsub, listUnsubscribe: url });
+    const sent = await postToResend({
+      to: email,
+      subject,
+      text: bodyWithUnsub,
+      listUnsubscribe: url,
+      idempotencyKey: actionId,
+    });
     if (!sent.ok) {
       if (actionId) {
         await db.from('actions').update({ status: 'failed', block_reason: sent.error }).eq('id', actionId);
@@ -243,11 +268,29 @@ export async function sendEmail(
  * Deliver an email action that was already queued (by the email-specialist
  * route). Re-runs the consent gate at send time, records the basis, sends, and
  * updates the existing row. Used by the send-queue cron and its manual trigger.
+ *
+ * The row is claimed first: moved from 'queued' to 'sending' by an update
+ * that only matches while it is still 'queued'. The cron and the dashboard
+ * button select the same queued rows, and without the claim two overlapping
+ * passes both sent each one. Whichever pass loses the claim sends nothing.
  */
 export async function deliverQueuedEmailAction(
   db: SupabaseClient,
   action: QueuedEmailAction
 ): Promise<SendEmailResult> {
+  const { data: claimed, error: claimError } = await db
+    .from('actions')
+    .update({ status: 'sending' })
+    .eq('id', action.id)
+    .eq('status', 'queued')
+    .select('id');
+  if (claimError) {
+    return { status: 'failed', actionId: action.id, error: `claim_failed: ${claimError.message}` };
+  }
+  if (!claimed?.length) {
+    return { status: 'skipped', actionId: action.id, reason: 'already_claimed' };
+  }
+
   const verdict = await evaluateConsent(db, {
     workspaceId: action.workspace_id,
     leadId: action.lead_id,
@@ -297,6 +340,7 @@ export async function deliverQueuedEmailAction(
       subject: action.subject ?? '',
       text,
       listUnsubscribe: url,
+      idempotencyKey: action.id,
     });
     if (!sent.ok) {
       await db.from('actions').update({ status: 'failed', block_reason: sent.error }).eq('id', action.id);

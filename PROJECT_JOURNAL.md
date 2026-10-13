@@ -353,3 +353,85 @@ pass with `TZ=America/Los_Angeles`) and `npm run build`. Both pages reloaded
 in the browser with no hydration error. The repro sequence and enrolment
 made during QA were removed; the QA LinkedIn sequence and Neha Bhatt's
 enrolment were left as they were.
+
+### 2026-10-13 QA faults: suppression never written, duplicate sends, approvals past the gate
+
+**Problem.** QA found three faults on the send path.
+
+1. *Suppression never written.* The unique indexes on `suppression_list`
+   were partial (`where email is not null`), and every writer upserts with
+   `onConflict: 'workspace_id,email'` or `'workspace_id,phone'`. Postgres only
+   uses a partial index as an ON CONFLICT arbiter when the statement repeats
+   its predicate, which PostgREST cannot do, so every upsert failed with
+   42P10. No caller checked the error: the unsubscribe route answered 200,
+   the webhook acknowledged, and the address stayed sendable. The live table
+   had zero rows.
+2. *Duplicate sends.* The send-queue cron and the dashboard's "Process send
+   queue" button select the same queued rows, and nothing marked a row as
+   taken, so overlapping passes each sent it.
+3. *Approvals bypassed consent* (fault 4 in the QA report). Approving a
+   LinkedIn, Instagram or voice draft marked it sent with no gate, so a
+   draft written before an unsubscribe was recorded as sent to a suppressed
+   lead.
+
+**Change.**
+
+- Migration 0009 replaces the three partial unique indexes with plain ones
+  under the same names. NULLs are distinct in a unique index, so rows with a
+  null email or phone still coexist.
+- `lib/cadence/suppression.ts`: `writeSuppression()` and
+  `blockPendingActions()`, both throwing on a database error. All four call
+  sites use them (unsubscribe route, `suppressLead` in the Resend webhook,
+  `suppress` in the follow-up cron) and answer 500 so the caller retries;
+  everything is idempotent. The unsubscribe error page now returns 500 too.
+  The follow-up cron writes the suppression row before moving the stage,
+  because a suppressed lead leaves its due list and would never be retried,
+  and phone-only leads now upsert against the phone index.
+- Migration 0010 adds `sending` to `action_status`.
+  `deliverQueuedEmailAction` claims the row first, `queued` → `sending`,
+  with an update that only matches a still-queued row; the loser returns
+  `skipped` and sends nothing. `sendEmail` inserts its row as `sending`, and
+  refuses to send without a row. The action id goes to Resend as
+  `Idempotency-Key`.
+- `lib/cadence/approvals.ts`: `approvalPatch()` runs `evaluateConsent` for
+  non-email channels. A refusal blocks the draft and the route answers 409
+  with the reason; a pass records `consent_basis`. Email still only queues,
+  since the send path gates it.
+- Suppressing a lead blocks its `awaiting_approval` and `queued` actions
+  (`block_reason = 'lead_suppressed'`), leaving `sending` alone.
+
+**Decisions worth knowing.** A row left in `sending` (process died between
+claim and result) is never picked up again, deliberately: whether it went out
+is unknown, and resending is the fault being fixed. Deploy only after 0010 is
+applied, or every claim fails and nothing sends (rows stay queued, nothing is
+lost). Still open: suppressing a lead whose phone is already on the list under
+a different email raises 23505 on the phone index, which now returns 500 on
+every retry instead of passing silently.
+
+**Tests.** 16 new across `suppression.test.ts`, `adapters/email.test.ts` and
+`approvals.test.ts`, on a shared fake PostgREST
+(`lib/cadence/testing/fake-postgrest.ts`) whose upsert chooses its arbiter the
+way Postgres does. The suppression test replays the real migration files, so
+it shows the 42P10 at 0008 and passes at 0010. `email.ts` imports the consent
+gate by relative path so `node --test` can load it. Each test was checked to
+fail with its fix reverted.
+
+**Verification.** `tsc`, `npm test` (203 passing) and `npm run build`. The
+three QA cases were re-run against the live project after 0009 and 0010 were
+applied, through the dev server, in a throwaway workspace with the lead at
+Resend's sink `delivered@resend.dev`:
+
+- Unsubscribe: one-click POST 200 twice, one `suppression_list` row, lead
+  suppressed, consent revoked.
+- Duplicate send: three concurrent `/api/queue/process` passes on one queued
+  email sent it once (sent 0, 0, 1); Resend's list shows one email. Two posts
+  with the same Idempotency-Key returned the same id.
+- Approvals: the pre-opt-out LinkedIn draft was already blocked; a draft for
+  the suppressed lead got 409 "Blocked by the consent gate: lead_suppressed";
+  a clean lead's draft still approved with basis `none`.
+
+The webhook and follow-up cron paths were not exercised live
+(`RESEND_WEBHOOK_SECRET` is not set locally, and the cron calls the model);
+the unit tests cover them. The cron route was avoided for the send test
+because it delivers every workspace's queue. The throwaway user and workspace
+were deleted afterwards and nothing was left behind.

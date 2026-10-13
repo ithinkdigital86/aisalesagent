@@ -18,6 +18,7 @@
 // and the confirm page is itself the confirmation for the browser caller.
 
 import { verifyUnsubscribeToken } from '@/lib/cadence/adapters/email';
+import { blockPendingActions, writeSuppression } from '@/lib/cadence/suppression';
 import { supabaseService } from '@/lib/supabase/server';
 
 type Outcome =
@@ -207,7 +208,9 @@ function page(outcome: Outcome): Response {
 </html>`;
 
   return new Response(html, {
-    status: 200,
+    // The error page says the address is not unsubscribed yet, so its status
+    // says so too.
+    status: outcome.state === 'error' ? 500 : 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       // The confirm page carries a live token and the result page reports a
@@ -272,9 +275,13 @@ async function suppressFromToken(request: Request): Promise<Settled> {
   try {
     const db = supabaseService();
 
-    await db.from('suppression_list').upsert(
+    // Throws on a database error, which lands in the catch below as 'error'
+    // and a 500. Answering 200 to a suppression that was not written tells
+    // the mail client it is done when the address is still sendable.
+    await writeSuppression(
+      db,
       { workspace_id: workspaceId, email: normalised, reason: 'unsubscribed' },
-      { onConflict: 'workspace_id,email', ignoreDuplicates: true }
+      'workspace_id,email'
     );
 
     const { data: leads } = await db
@@ -290,6 +297,7 @@ async function suppressFromToken(request: Request): Promise<Settled> {
         .update({ stage: 'suppressed', next_action_at: null })
         .eq('id', lead.id);
       await db.from('consent_records').update({ revoked_at: now }).eq('lead_id', lead.id);
+      await blockPendingActions(db, workspaceId, lead.id);
     }
 
     return { state: 'unsubscribed', email: normalised };

@@ -14,6 +14,7 @@ import { NextResponse } from 'next/server';
 import { supabaseService } from '@/lib/supabase/server';
 import { runAgent } from '@/lib/cadence/runtime';
 import { evaluateConsent, type Channel } from '@/lib/cadence/consent';
+import { blockPendingActions, writeSuppression } from '@/lib/cadence/suppression';
 
 export const maxDuration = 300;
 
@@ -33,6 +34,8 @@ export async function GET(request: Request) {
     .limit(100);
 
   const handled = [];
+  // One failed suppression fails the run, after the other leads are handled.
+  let suppressionFailed = false;
 
   for (const lead of due ?? []) {
     const run = await runAgent<{
@@ -60,8 +63,18 @@ export async function GET(request: Request) {
     const d = run.data;
 
     if (d.next_action === 'suppress') {
-      await suppress(db, lead.workspace_id, lead.id);
-      handled.push({ leadId: lead.id, ok: true, action: 'suppressed' });
+      try {
+        await suppress(db, lead.workspace_id, lead.id);
+        handled.push({ leadId: lead.id, ok: true, action: 'suppressed' });
+      } catch (err) {
+        suppressionFailed = true;
+        handled.push({
+          leadId: lead.id,
+          ok: false,
+          action: 'suppress',
+          error: err instanceof Error ? err.message : 'unknown_error',
+        });
+      }
       continue;
     }
 
@@ -94,7 +107,10 @@ export async function GET(request: Request) {
     });
   }
 
-  return NextResponse.json({ processed: handled.length, handled });
+  return NextResponse.json(
+    { processed: handled.length, handled },
+    { status: suppressionFailed ? 500 : 200 }
+  );
 }
 
 async function suppress(db: ReturnType<typeof supabaseService>, workspaceId: string, leadId: string) {
@@ -104,18 +120,29 @@ async function suppress(db: ReturnType<typeof supabaseService>, workspaceId: str
     .eq('id', leadId)
     .single();
 
-  await db.from('leads').update({ stage: 'suppressed', next_action_at: null }).eq('id', leadId);
-  await db.from('consent_records').update({ revoked_at: new Date().toISOString() }).eq('lead_id', leadId);
-
-  if (lead?.email || lead?.phone) {
-    await db.from('suppression_list').upsert(
+  // The suppression row goes first and throws on failure. Moving the stage
+  // to suppressed takes the lead out of this cron's due list, so a stage
+  // written ahead of a failed upsert would never be retried.
+  if (lead?.email) {
+    await writeSuppression(
+      db,
       {
         workspace_id: workspaceId,
-        email: lead.email?.toLowerCase() ?? null,
+        email: lead.email.toLowerCase(),
         phone: lead.phone ?? null,
         reason: 'unsubscribed',
       },
-      { onConflict: 'workspace_id,email', ignoreDuplicates: true }
+      'workspace_id,email'
+    );
+  } else if (lead?.phone) {
+    await writeSuppression(
+      db,
+      { workspace_id: workspaceId, phone: lead.phone, reason: 'unsubscribed' },
+      'workspace_id,phone'
     );
   }
+
+  await db.from('leads').update({ stage: 'suppressed', next_action_at: null }).eq('id', leadId);
+  await db.from('consent_records').update({ revoked_at: new Date().toISOString() }).eq('lead_id', leadId);
+  await blockPendingActions(db, workspaceId, leadId);
 }

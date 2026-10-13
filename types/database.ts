@@ -897,7 +897,7 @@ export type Database = {
       };
     };
     Enums: {
-      action_status: 'queued' | 'awaiting_approval' | 'sent' | 'failed' | 'blocked';
+      action_status: 'queued' | 'sending' | 'awaiting_approval' | 'sent' | 'failed' | 'blocked';
       agent_slug:
         | 'sales_manager'
         | 'qualifier'
@@ -946,7 +946,7 @@ export type Enums<T extends keyof PublicSchema['Enums']> = PublicSchema['Enums']
 export const Constants = {
   public: {
     Enums: {
-      action_status: ['queued', 'awaiting_approval', 'sent', 'failed', 'blocked'],
+      action_status: ['queued', 'sending', 'awaiting_approval', 'sent', 'failed', 'blocked'],
       agent_slug: [
         'sales_manager',
         'qualifier',

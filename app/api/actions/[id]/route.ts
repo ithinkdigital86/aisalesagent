@@ -6,6 +6,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
+import { approvalPatch } from '@/lib/cadence/approvals';
 import { supabaseServer } from '@/lib/supabase/server';
 
 const bodySchema = z.object({
@@ -39,7 +40,7 @@ export async function PATCH(
     // RLS scopes this to the caller's workspace.
     const { data: action } = await db
       .from('actions')
-      .select('id, channel, status')
+      .select('id, workspace_id, lead_id, channel, status')
       .eq('id', id)
       .single();
     if (!action) return NextResponse.json({ error: 'Action not found' }, { status: 404 });
@@ -69,15 +70,19 @@ export async function PATCH(
     }
 
     // approve. Email goes back into the send queue; human-send channels
-    // (LinkedIn, Instagram, voice) are marked sent because a person delivers them.
-    const now = new Date().toISOString();
-    const patch =
-      action.channel === 'email'
-        ? { status: 'queued' as const, scheduled_for: now }
-        : { status: 'sent' as const, sent_at: now };
+    // (LinkedIn, Instagram, voice) are marked sent because a person delivers
+    // them, once the consent gate has passed them. A refusal blocks the draft
+    // so it leaves the approvals list, and the caller is told why.
+    const patch = await approvalPatch(db, action);
 
     const { error } = await db.from('actions').update(patch).eq('id', id);
     if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+    if (patch.status === 'blocked') {
+      return NextResponse.json(
+        { error: `Blocked by the consent gate: ${patch.block_reason}`, data: { id, status: 'blocked' } },
+        { status: 409 }
+      );
+    }
     return NextResponse.json({ data: { id, status: patch.status } });
   } catch (err) {
     return NextResponse.json(

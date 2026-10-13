@@ -28,6 +28,7 @@ import crypto from 'node:crypto';
 import { NextResponse } from 'next/server';
 
 import { classifyReply, splitQuotedReply } from '@/lib/cadence/reply';
+import { blockPendingActions, writeSuppression } from '@/lib/cadence/suppression';
 import { supabaseService } from '@/lib/supabase/server';
 
 /** Svix's own default. Older than this and the signature is stale, not valid. */
@@ -308,22 +309,28 @@ async function suppressLead(db: Db, workspaceId: string, leadId: string, reason:
     .eq('lead_id', leadId)
     .is('revoked_at', null);
 
+  // Both writes throw on a database error, which the route answers with a
+  // 500 so Resend redelivers the event.
   if (lead?.email) {
-    await db.from('suppression_list').upsert(
+    await writeSuppression(
+      db,
       {
         workspace_id: workspaceId,
         email: (lead.email as string).toLowerCase(),
         phone: (lead.phone as string | null) ?? null,
         reason,
       },
-      { onConflict: 'workspace_id,email', ignoreDuplicates: true }
+      'workspace_id,email'
     );
   } else if (lead?.phone) {
-    await db.from('suppression_list').upsert(
-      { workspace_id: workspaceId, phone: lead.phone, reason },
-      { onConflict: 'workspace_id,phone', ignoreDuplicates: true }
+    await writeSuppression(
+      db,
+      { workspace_id: workspaceId, phone: lead.phone as string, reason },
+      'workspace_id,phone'
     );
   }
+
+  await blockPendingActions(db, workspaceId, leadId);
 }
 
 /** Bring the Follow-up manager forward so it reads the reply on the next tick. */
