@@ -768,3 +768,59 @@ attempt 3, and its failure stops the run. With the runner writing null for
 
 **Verification.** `tsc`, `npm test`, `npm run lint`, `npm run build`. The
 migration has not been run in Supabase.
+
+### 2026-10-14 Deferrals and follow-up waits count calendar days
+
+**Problem.** The low fit score and consent deferrals in the sequence runner
+added exactly 24 hours (1 day) and 168 hours (7 days) to `next_action_at`
+through `dueAt`. The send-queue cron runs once a day, so a deferral made a
+few seconds into a pass landed a few seconds after the matching pass later on
+and slipped a whole day, and a lead deferred again and again drifted further
+each time. This is the item the fault 6 entry left open, with the same cause.
+
+**Change.**
+
+- Fit and consent deferrals use `dueOn()`: due from the start of the day in
+  `DISPLAY_TIME_ZONE` that many days on. `BELOW_FIT_RETRY_DAYS` (1) and
+  `BLOCKED_RETRY_DAYS` (7) are unchanged, now as calendar days.
+- Enrolment (`enrolLeads`) set step one due at now plus its delay in 24-hour
+  days. It now uses `dueOn()` like every later step. A delay of 0 is the
+  start of today, so still due at once.
+- The follow-up cron also runs once a day and had the same slip. A channel
+  the gate refuses now waits 7 calendar days (`CHANNEL_BLOCKED_DAYS`) rather
+  than 168 hours, and the Follow-up manager's `wait_hours` counts days,
+  rounding a part day up: 24 is tomorrow, 30 the day after, 0 today. The
+  longer of the two wins, as before.
+- `dueAt` is removed, so nothing goes back to counting 24-hour periods.
+- The follow-up cron's header said it runs every 6 hours; `vercel.json` runs
+  it daily, and the comment says so now.
+
+**Decisions worth knowing.**
+
+- Rounding `wait_hours` up, not to the nearest day: a lead should never come
+  back before the wait the manager gave it. A wait of a few hours means the
+  next run either way, since the cron is daily.
+- Left alone, same shape but no effect today: the qualifier's
+  `nextActionFor` (48 and 720 hours), because nothing schedules off a
+  qualified or parked lead's date; and `delayHours` on the email specialist
+  route, which no caller in the app passes.
+- Not checked: the daily cap counts a rolling 24 hours, so on a cron that
+  runs at the same time each day, yesterday's sends may still be in the
+  window when the next pass starts, and a workspace at its cap might send
+  only every other day. Moving the retry date would not help, since the
+  claim itself would refuse. Worth a test of its own.
+
+**Tests.** 5 more than before (6 new, the `dueAt` test removed). The cron
+tests read the clock before and after the run and accept the day from
+either, so a run that straddles midnight IST does not fail them. Send-queue
+route: the fit test now expects the start of tomorrow, and a new test has a
+revoked consent record defer the lead 7 calendar days with nothing drafted.
+Follow-up route: waits of 24, 168, 30 and 0 hours, and a refused SMS channel
+with a 24-hour wait (7 days) and a 240-hour one (10). `enrolLeads`: a 0-day
+first step is due now, a 2-day one from the start of the day two days on.
+`sequence.test.ts`: a 1- and 7-day deferral made seconds into a pass is due
+by the matching pass and not the one before. With the four source files put
+back, the 5 route and action tests fail.
+
+**Verification.** `tsc`, `npm test` (318 passing, also with
+`TZ=America/Los_Angeles`), `npm run lint`, `npm run build`. No migration.
