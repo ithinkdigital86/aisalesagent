@@ -824,3 +824,66 @@ back, the 5 route and action tests fail.
 
 **Verification.** `tsc`, `npm test` (318 passing, also with
 `TZ=America/Los_Angeles`), `npm run lint`, `npm run build`. No migration.
+
+### 2026-10-14 The daily cap counts the calendar day in India
+
+**Problem.** The last entry's open item, confirmed. `daily_send_cap` counted
+sends in a rolling 24 hours, and the send-queue cron runs once a day at
+09:00 IST. Its sends land a few seconds into the run, so at the next day's
+09:00 they were a few seconds short of 24 hours old and still in the window.
+A workspace that reached its cap sent nothing the next day and only every
+other day after that. Reproduced first, before any change: a new cron test
+with a cap of 3 and nine queued emails, run at 09:00:05 on the 14th and
+09:00:00 on the 15th, sent 3 and then 0.
+
+**Change.**
+
+- Migration 0013 replaces `claim_email_send` with the same function counting
+  from midnight today in `Asia/Kolkata` instead of `now() - 24 hours`. The
+  workspace-row lock (one claim at a time), the answers and the grants are
+  unchanged, and so is the handling of rows in `sending`: one claimed today
+  counts against the cap, and one stuck there stops counting when its day
+  ends, as a send does (it used to stop 24 hours after its claim). The column
+  comment on `daily_send_cap` says calendar day.
+- `send-controls.ts`: the window starts at `dueOn(now, 0)`. `freesAt` (the
+  oldest send plus 24 hours) is now `resetsAt`, the start of tomorrow, and
+  the third query that found the oldest send is gone. `retryAfterCap` is
+  replaced by `capResetsAt()`, so the queue's held `retryAt` and a sequence
+  step the cap deferred are both due from midnight. `SEND_WINDOW_HOURS` is
+  removed.
+- Dashboard panel and banner: "Sent today" and "emails sent today", the cap
+  explained as a calendar day in India time, and a full cap waits "until
+  15 Oct 00:00".
+- The fake PostgREST's copy of the claim counts the same way.
+
+**Decisions worth knowing.**
+
+- A calendar day lets up to twice the cap out inside some 24 hours: the cap
+  just before midnight and again just after. The cron runs at 09:00, so only
+  manual "Process send queue" passes either side of midnight can do that.
+- The zone is hard-coded in the SQL. It must move with `DISPLAY_TIME_ZONE`.
+
+**Deploy order.** Apply 0013, then deploy the code. Either order is safe:
+neither lets out more than the cap in a calendar day. 0013 under the old
+code changes nothing on the cron, since the old look-ahead still skips a
+workspace whose last 24 hours are full. The code against 0011 looks ahead
+by calendar day and asks for claims the old function refuses: those rows
+stay queued as now, but the dashboard shows room the claim will not give,
+and the runner drafts steps that sit in the queue.
+
+**Tests.** `app/api/cron/send-queue/daily-cap.test.ts` runs the cron on a
+clock the test sets (`mock.timers`, Date only): a capped workspace sends its
+cap three days running; a second run the same evening sends nothing and
+holds the rest until 18:30 UTC, and a run a minute after midnight IST sends
+again; a sequence step held by the cap on day one is drafted and sent on day
+two. All three fail against the old code. `send-controls.test.ts` now runs
+at a fixed noon IST: a send at midnight counts and one a second before does
+not; the day starts at midnight in India, not UTC (a 23:00 UTC send counts
+for the next IST day); a row stuck in `sending` since before midnight no
+longer counts and is left as it is; the window reports `resetsAt`. Route
+and sequence-timing tests that put a send "2 or 3 hours ago" now put it at
+now, since a few hours ago is yesterday just after midnight IST.
+
+**Verification.** `tsc`, `npm test` (323 passing, also with
+`TZ=America/Los_Angeles`), `npm run lint`, `npm run build`. The migration has
+not been run in Supabase.
