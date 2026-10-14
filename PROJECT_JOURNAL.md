@@ -580,3 +580,47 @@ those tests only fail with both removed, which is the design.
 first run failed once on a millisecond race between two timestamps in one
 test, which was fixed), `npm run lint`, `npm run build`. Nothing was run
 against the live database or Resend.
+
+### 2026-10-14 Unsubscribe links get their own secret
+
+**Problem.** Unsubscribe tokens were signed with `CRON_SECRET ?? ''`. With
+the secret unset the key was empty, so anyone could sign a token for any
+address in any workspace. And because the links never expire, rotating
+`CRON_SECRET` would have broken every link in every email already sent.
+
+**Was any live link out there?** Checked before choosing whether to keep a
+fallback. Every one of the 522 emails Resend holds for the account
+(2026-09-20 to today) was fetched and its body searched for
+`/api/unsubscribe?token=`. 16 carry one, all from Cadence's `EMAIL_FROM`, all
+to `@resend.dev` or `.example` addresses, all pointing at
+`http://localhost:3000`. The other 505 are other apps on the same account
+(Trident Group, Simply Manager, info@) and carry no Cadence link. The database
+has two sent email rows, both to `.example`. So no recipient holds a link
+signed the old way, and no fallback to `CRON_SECRET` was kept. Resend's log
+does not reach back before 2026-09-20; workspaces deleted before then took
+their action rows with them, so that stretch is covered only by what the
+journal says was sent.
+
+**Change.**
+
+- `adapters/email.ts`: signs and verifies with `UNSUBSCRIBE_SECRET`. Unset or
+  empty throws on both; nothing falls back to an empty key.
+- `deliverQueuedEmailAction` checks the key before the claim, so an unset key
+  throws with the row still `queued` (the cron answers 500 and nothing is
+  sent) instead of stranding it in `sending`. `sendEmail` already signed
+  before writing its row, so it throws with nothing written.
+- Unsubscribe route: an unset key is the `error` state (500, "you have not
+  been unsubscribed yet", and a one-click client retries), not
+  `invalid_token`, which would call a working link broken.
+- `.env.local.example`, `DEPLOYMENT.md` and `LOCAL_SETUP.md` list the variable.
+  It is already set locally and in Vercel.
+
+**Tests.** 14 new: `adapters/unsubscribe-token.test.ts` (signing key,
+`CRON_SECRET` rotation, empty-key forgery, unset and empty, both send paths)
+and `app/api/unsubscribe/route.test.ts` (one-click, confirm page and form,
+forged and unset). The six existing test files that send email set the
+variable. Each part was reverted in turn to check a test fails: the old key
+(10 fail), the pre-claim check (1), the route's catch (3).
+
+**Verification.** `tsc`, `npm test` (270 passing), `npm run lint`,
+`npm run build`. The Resend and database checks above were reads only.
