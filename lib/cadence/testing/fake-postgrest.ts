@@ -1,8 +1,8 @@
 // lib/cadence/testing/fake-postgrest.ts
 //
 // An in-memory stand-in for the slice of supabase-js that the consent gate,
-// the email adapter and the suppression writes use. Not a test file itself;
-// the tests next to those modules import it.
+// the email adapter, the suppression writes and the cron routes use. Not a
+// test file itself; the tests next to those modules import it.
 //
 // Two behaviours are modelled on Postgres closely enough to test against,
 // because the faults they guard were in exactly those places:
@@ -38,9 +38,24 @@ export interface UniqueIndex {
 
 type Filter = (row: Row) => boolean;
 
+/** What a fault sees of the statement about to run. */
+export interface Statement {
+  table: string;
+  op: 'select' | 'insert' | 'update' | 'upsert';
+  /** The values of every eq() filter on it, by column. */
+  eq: Record<string, unknown>;
+  /** The rows an insert or upsert carries; empty otherwise. */
+  rows: Row[];
+}
+
+/** Returns an error to fail the statement with, or null to let it run. */
+export type Fault = (statement: Statement) => FakeError | null;
+
 export class FakeDb {
   tables: Record<string, Row[]> = {};
   indexes: Record<string, UniqueIndex[]> = {};
+  /** Checked before every statement, for testing what callers do with an error. */
+  faults: Fault[] = [];
   private nextId = 1;
 
   constructor(tables: Record<string, Row[]> = {}) {
@@ -140,6 +155,7 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
   private patch: Row = {};
   private upsertOptions: { onConflict?: string; ignoreDuplicates?: boolean } = {};
   private filters: Filter[] = [];
+  private equals: Record<string, unknown> = {};
   private returning = false;
   private singleRow = false;
   private maybe = false;
@@ -186,6 +202,7 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
 
   eq(column: string, value: unknown) {
     this.filters.push((row) => row[column] === value);
+    this.equals[column] = value;
     return this;
   }
 
@@ -226,14 +243,20 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
     return this;
   }
 
-  /** PostgREST's `col.eq.value,col.eq.value`, which is all consent.ts sends. */
+  /**
+   * PostgREST's `col.eq.value`, `col.is.null` and `col.not.is.null` terms,
+   * joined by commas: what consent.ts and the follow-up cron send.
+   */
   or(expression: string) {
-    const terms = expression.split(',').map((term) => {
+    const terms: Filter[] = expression.split(',').map((term) => {
       const [column, operator, ...rest] = term.split('.');
-      if (operator !== 'eq') throw new Error(`fake or(): unsupported operator ${operator}`);
-      return { column, value: rest.join('.') };
+      const value = rest.join('.');
+      if (operator === 'eq') return (row) => row[column] === value;
+      if (operator === 'is' && value === 'null') return (row) => (row[column] ?? null) === null;
+      if (operator === 'not' && value === 'is.null') return (row) => (row[column] ?? null) !== null;
+      throw new Error(`fake or(): unsupported term ${term}`);
     });
-    this.filters.push((row) => terms.some(({ column, value }) => row[column] === value));
+    this.filters.push((row) => terms.some((holds) => holds(row)));
     return this;
   }
 
@@ -302,6 +325,12 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
   }
 
   private run(): { data: unknown; error: FakeError | null } {
+    const statement: Statement = { table: this.table, op: this.op, eq: this.equals, rows: this.payload };
+    for (const fault of this.db.faults) {
+      const error = fault(statement);
+      if (error) return { data: null, error };
+    }
+
     const rows = this.db.rows(this.table);
 
     if (this.op === 'select') return this.shape(this.matching());

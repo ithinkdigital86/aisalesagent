@@ -19,13 +19,14 @@ import { NextResponse } from 'next/server';
 import { supabaseService } from '@/lib/supabase/server';
 import { runAgent } from '@/lib/cadence/runtime';
 import { evaluateConsent, type Channel } from '@/lib/cadence/consent';
+import { isCronRequest } from '@/lib/cadence/cron-auth';
 import { inList, pausedWorkspaceIds } from '@/lib/cadence/send-controls';
 import { blockPendingActions, writeSuppression } from '@/lib/cadence/suppression';
 
 export const maxDuration = 300;
 
 export async function GET(request: Request) {
-  if (request.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isCronRequest(request)) {
     return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
   }
 

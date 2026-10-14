@@ -13,13 +13,14 @@
 
 import { NextResponse } from 'next/server';
 
+import { isCronRequest } from '@/lib/cadence/cron-auth';
 import { runAgent } from '@/lib/cadence/runtime';
 import { supabaseService } from '@/lib/supabase/server';
 
 export const maxDuration = 300;
 
 export async function GET(request: Request) {
-  if (request.headers.get('authorization') !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isCronRequest(request)) {
     return NextResponse.json({ error: 'Unauthorised' }, { status: 401 });
   }
 

@@ -7,7 +7,7 @@
     "build": "next build --turbopack",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test \"lib/**/*.test.ts\"",
+    "test": "node --test \"lib/**/*.test.ts\" \"app/**/*.test.ts\"",
     "check": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/check.ts"
   },
   "dependencies": {
