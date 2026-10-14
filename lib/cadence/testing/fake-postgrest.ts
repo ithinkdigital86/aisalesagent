@@ -16,11 +16,13 @@
 //    old status behaves like the single UPDATE it stands for: of two callers,
 //    only the first finds the row still matching.
 //
-//  - rpc('claim_email_send') is the function from migration 0011, written
+//  - rpc('claim_email_send') is the function from migration 0013, written
 //    out again here, and runs whole in the same way, which is what the lock
 //    on the workspace row buys the real one.
 
 import type { SupabaseClient } from '@supabase/supabase-js';
+
+import { dueOn } from '../sequence.ts';
 
 type Row = Record<string, unknown>;
 
@@ -99,7 +101,7 @@ export class FakeDb {
     return { then: (onfulfilled, onrejected) => Promise.resolve().then(call).then(onfulfilled, onrejected) };
   }
 
-  /** migration 0011's claim_email_send. Defaults are the column defaults. */
+  /** migration 0013's claim_email_send. Defaults are the column defaults. */
   private claimEmailSend(actionId: string): string {
     const action = this.rows('actions').find((row) => row.id === actionId);
     if (!action) return 'not_found';
@@ -110,7 +112,8 @@ export class FakeDb {
     const cap = (workspace?.daily_send_cap as number | undefined) ?? 50;
 
     const now = this.now();
-    const since = now.getTime() - 24 * 3_600_000;
+    // Midnight today in India, as the SQL reads it.
+    const since = new Date(dueOn(now, 0)).getTime();
     const at = (value: unknown) => (typeof value === 'string' ? new Date(value).getTime() : NaN);
     const used = this.rows('actions').filter(
       (row) =>

@@ -39,8 +39,6 @@ import { dueOn } from '../../../../lib/cadence/sequence.ts';
 registerRouteLoader(CRON_DOUBLES);
 const { GET } = await import('./route.ts');
 
-const DAY = 86_400_000;
-
 let db: FakeDb;
 let network: ResendStub;
 
@@ -153,10 +151,11 @@ test('an unreadable kill switch fails the run with nothing drafted or sent', asy
 
 test('delivery stops at the cap and leaves the rest queued', async () => {
   workspace('ws', { cap: 3 });
-  addSent(db, 'ws', 'ws-lead', [2]);
+  // Sent just now, so it is today in India whenever the test runs.
+  addSent(db, 'ws', 'ws-lead', [0]);
   const queued = queueEmails(db, 'ws', 'ws-lead', 5);
 
-  const { status, body } = await run();
+  const { status, body, dueIn } = await runDated();
 
   assert.equal(status, 200);
   assert.deepEqual(network.sent, queued.slice(0, 2), 'oldest first, up to the cap');
@@ -169,22 +168,21 @@ test('delivery stops at the cap and leaves the rest queued', async () => {
   assert.equal(body.held.length, 1);
   assert.equal(body.held[0].reason, 'daily_cap_reached');
   assert.equal(body.held[0].waiting, 3);
-  // The send from two hours ago is the first to age out of the window.
-  const freesAt = new Date(db.rows('actions').find((r) => r.id === 'ws-lead-sent-0')!.sent_at as string);
-  assert.equal(new Date(body.held[0].retryAt).getTime(), freesAt.getTime() + DAY);
+  // The count starts again at midnight in India.
+  assert.ok(dueIn(1).includes(body.held[0].retryAt), 'held until the start of tomorrow');
 });
 
 test('a full workspace does not draft a sequence step it could not send today', async () => {
   workspace('ws', { cap: 1 });
-  addSent(db, 'ws', 'ws-lead', [3]);
+  addSent(db, 'ws', 'ws-lead', [0]);
   dueOnSequence('ws', 'seq-lead');
 
-  const { body } = await run();
+  const { body, dueIn } = await runDated();
 
   assert.equal(agentCalls.length, 0);
   assert.equal(outcomeOf(body, 'seq-lead')?.reason, 'daily_cap_reached');
   assert.equal(leadOf(db, 'seq-lead').sequence_step, 0);
-  assert.ok(new Date(leadOf(db, 'seq-lead').next_action_at as string).getTime() > Date.now());
+  assert.ok(dueIn(1).includes(leadOf(db, 'seq-lead').next_action_at as string), 'looked at again tomorrow');
 });
 
 test('one workspace at its cap does not hold back another', async () => {

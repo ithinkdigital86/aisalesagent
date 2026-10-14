@@ -8,23 +8,27 @@
 // against a throwaway workspace (see PROJECT_JOURNAL.md).
 
 import assert from 'node:assert/strict';
-import { afterEach, beforeEach, test } from 'node:test';
+import { afterEach, beforeEach, mock, test } from 'node:test';
 
 import { FakeDb, asClient } from './testing/fake-postgrest.ts';
 import { deliverQueuedEmailAction, sendEmail } from './adapters/email.ts';
-import { checkFit, formatSendTime, loadSendWindow, retryAfterCap } from './send-controls.ts';
+import { capResetsAt, checkFit, formatSendTime, loadSendWindow } from './send-controls.ts';
 import { deliverDueEmails } from './send-queue.ts';
 
-// The real clock, because the adapter stamps sent_at with it and the window
-// has to be measured from the same place.
-const NOW = new Date();
+// Noon in India, on a clock the tests set. The adapter stamps sent_at with
+// Date, and the day the cap counts starts at midnight there, so with the real
+// clock a send "an hour ago" would fall yesterday when the tests ran just
+// after midnight. Midnight today is 12 hours before NOW.
+const NOW = new Date('2026-10-14T06:30:00.000Z');
 const HOUR = 3_600_000;
+const SINCE_MIDNIGHT = 12;
 const ago = (hours: number) => new Date(NOW.getTime() - hours * HOUR).toISOString();
 
 let resendCalls: string[] = [];
 const realFetch = globalThis.fetch;
 
 beforeEach(() => {
+  mock.timers.enable({ apis: ['Date'], now: NOW });
   process.env.UNSUBSCRIBE_SECRET = 'unsubscribe-test-secret';
   resendCalls = [];
   globalThis.fetch = (async (_url: string, init: RequestInit) => {
@@ -35,6 +39,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = realFetch;
+  mock.timers.reset();
 });
 
 interface WorkspaceSpec {
@@ -214,8 +219,8 @@ test('a row blocked at send time does not use up a slot', async () => {
   assert.deepEqual(result.held, []);
 });
 
-test('the claim refuses a row once the window is full', async () => {
-  const db = world({ id: 'ws', cap: 3, sentHoursAgo: [1, 5, 23], queued: 1 });
+test('the claim refuses a row once the day is full', async () => {
+  const db = world({ id: 'ws', cap: 3, sentHoursAgo: [1, 5, SINCE_MIDNIGHT], queued: 1 });
 
   const result = await deliverQueuedEmailAction(asClient(db), action(db, 'ws-q-0'));
 
@@ -224,15 +229,33 @@ test('the claim refuses a row once the window is full', async () => {
   assert.equal(resendCalls.length, 0);
 });
 
-test('sends older than 24 hours have left the window', async () => {
-  const db = world({ id: 'ws', cap: 3, sentHoursAgo: [1, 25, 30], queued: 1 });
+test("yesterday's sends do not count, however recent", async () => {
+  // A second before midnight, and a rolling day's worth before that.
+  const db = world({ id: 'ws', cap: 2, sentHoursAgo: [1, SINCE_MIDNIGHT + 1 / 3600, 23], queued: 1 });
 
   const result = await deliverQueuedEmailAction(asClient(db), action(db, 'ws-q-0'));
 
   assert.equal(result.status, 'sent');
 });
 
-test('a row still mid-send counts against the cap', async () => {
+test('the day starts at midnight in India, not in UTC or on the machine', async () => {
+  // 05:00 UTC is 10:30 in India: one send at the day's first second there,
+  // one at 23:00 UTC the evening before, which is already 04:30 today.
+  mock.timers.setTime(new Date('2026-10-14T05:00:00.000Z').getTime());
+  const db = world({ id: 'ws', cap: 2, queued: 1 });
+  db.now = () => new Date();
+  for (const [index, at] of ['2026-10-13T18:30:00.000Z', '2026-10-13T23:00:00.000Z'].entries()) {
+    db.rows('actions').push({ id: `today-${index}`, workspace_id: 'ws', channel: 'email', status: 'sent', sent_at: at });
+  }
+
+  const result = await deliverQueuedEmailAction(asClient(db), action(db, 'ws-q-0'));
+
+  assert.equal(result.status, 'deferred', 'both count against today');
+  const window = await loadSendWindow(asClient(db), 'ws');
+  assert.deepEqual(window, { sent: 2, inFlight: 0, used: 2, resetsAt: '2026-10-14T18:30:00.000Z' });
+});
+
+test('a row claimed today and still mid-send counts against the cap', async () => {
   const db = world({ id: 'ws', cap: 1, queued: 2 });
   db.rows('actions')[0].status = 'sending';
   db.rows('actions')[0].updated_at = ago(0.1);
@@ -240,6 +263,17 @@ test('a row still mid-send counts against the cap', async () => {
   const result = await deliverQueuedEmailAction(asClient(db), action(db, 'ws-q-1'));
 
   assert.equal(result.status, 'deferred');
+});
+
+test('a row stuck in sending since yesterday stops counting at midnight, as a send would', async () => {
+  const db = world({ id: 'ws', cap: 1, queued: 2 });
+  db.rows('actions')[0].status = 'sending';
+  db.rows('actions')[0].updated_at = ago(SINCE_MIDNIGHT + 0.5);
+
+  const result = await deliverQueuedEmailAction(asClient(db), action(db, 'ws-q-1'));
+
+  assert.equal(result.status, 'sent');
+  assert.equal(statusOf(db, 'ws-q-0'), 'sending', 'left as it is: whether it went is unknown');
 });
 
 test('two passes at once cannot send past the cap between them', async () => {
@@ -263,26 +297,24 @@ test('a cap of 0 sends nothing', async () => {
   assert.equal(result.held[0].reason, 'daily_cap_reached');
 });
 
-test('the window reports what it counted and when the oldest send ages out', async () => {
-  const db = world({ id: 'ws', sentHoursAgo: [2, 20, 30], queued: 1 });
-  db.rows('actions').push({
-    id: 'flight',
-    workspace_id: 'ws',
-    channel: 'email',
-    status: 'sending',
-    sent_at: null,
-    updated_at: ago(3),
-  });
+test('the window reports what it counted today and when the count starts again', async () => {
+  const db = world({ id: 'ws', sentHoursAgo: [2, 11, 13], queued: 1 });
+  for (const [id, hours] of [['flight', 3], ['stale-flight', 14]] as const) {
+    db.rows('actions').push({
+      id,
+      workspace_id: 'ws',
+      channel: 'email',
+      status: 'sending',
+      sent_at: null,
+      updated_at: ago(hours),
+    });
+  }
 
   const window = await loadSendWindow(asClient(db), 'ws', NOW);
 
-  assert.deepEqual(window, { sent: 2, inFlight: 1, used: 3, freesAt: ago(20 - 24) });
-  assert.equal(retryAfterCap(window, NOW), ago(-4));
-  assert.equal(
-    retryAfterCap({ sent: 0, inFlight: 1, used: 1, freesAt: null }, NOW),
-    ago(-1),
-    'no send to age out: look again in an hour'
-  );
+  // Midnight tonight in India, 12 hours on, whatever was sent when.
+  assert.deepEqual(window, { sent: 2, inFlight: 1, used: 3, resetsAt: ago(-12) });
+  assert.equal(capResetsAt(NOW), ago(-12));
 });
 
 // ---------------------------------------------------------------

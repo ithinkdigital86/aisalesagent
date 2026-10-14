@@ -22,15 +22,10 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
-import { DISPLAY_TIME_ZONE, formatDueDate } from './sequence.ts';
-
-/** The cap counts sends in this many trailing hours. Matches the SQL. */
-export const SEND_WINDOW_HOURS = 24;
+import { DISPLAY_TIME_ZONE, dueOn, formatDueDate } from './sequence.ts';
 
 /** A row in 'sending' longer than this is reported as stuck. */
 export const STUCK_SENDING_MINUTES = 60;
-
-const HOUR_MS = 3_600_000;
 
 export interface SendControls {
   workspaceId: string;
@@ -126,19 +121,25 @@ export function checkFit(score: number | null | undefined, minFitScore: number):
 // ---------------------------------------------------------------
 // The send window
 // ---------------------------------------------------------------
+//
+// The cap counts the calendar day in India (migration 0013), not a rolling
+// 24 hours. The send-queue cron runs once a day at the same time, and its
+// sends land a few seconds into the run, so a rolling window still held them
+// when the next day's run started and a workspace at its cap sent only every
+// other day. The same reason the sequence timing counts calendar days.
 
 export interface SendWindow {
-  /** Emails whose sent_at falls in the window. */
+  /** Emails sent today. */
   sent: number;
-  /** Rows claimed in the window and not yet resolved. Counted against the cap. */
+  /** Rows claimed today and not yet resolved. Counted against the cap. */
   inFlight: number;
   /** What the cap is measured against: sent + inFlight. */
   used: number;
   /**
-   * When the oldest send in the window ages out and frees a slot, or null
-   * when the window is empty. A deferred step is due again at this time.
+   * The start of tomorrow, when the count starts again. A step deferred by
+   * the cap is due again at this time.
    */
-  freesAt: string | null;
+  resetsAt: string;
 }
 
 /**
@@ -151,9 +152,9 @@ export async function loadSendWindow(
   workspaceId: string,
   now: Date = new Date()
 ): Promise<SendWindow> {
-  const since = new Date(now.getTime() - SEND_WINDOW_HOURS * HOUR_MS).toISOString();
+  const since = dueOn(now, 0);
 
-  const [sentRes, flightRes, oldestRes] = await Promise.all([
+  const [sentRes, flightRes] = await Promise.all([
     db
       .from('actions')
       .select('id', { count: 'exact', head: true })
@@ -167,39 +168,23 @@ export async function loadSendWindow(
       .eq('channel', 'email')
       .eq('status', 'sending')
       .gte('updated_at', since),
-    db
-      .from('actions')
-      .select('sent_at')
-      .eq('workspace_id', workspaceId)
-      .eq('channel', 'email')
-      .gte('sent_at', since)
-      .order('sent_at', { ascending: true })
-      .limit(1),
   ]);
-  for (const res of [sentRes, flightRes, oldestRes]) {
+  for (const res of [sentRes, flightRes]) {
     if (res.error) throw new Error(`could not count sends: ${res.error.message}`);
   }
 
   const sent = sentRes.count ?? 0;
   const inFlight = flightRes.count ?? 0;
-  const oldest = (oldestRes.data?.[0] as { sent_at: string } | undefined)?.sent_at ?? null;
 
-  return {
-    sent,
-    inFlight,
-    used: sent + inFlight,
-    freesAt: oldest ? new Date(new Date(oldest).getTime() + SEND_WINDOW_HOURS * HOUR_MS).toISOString() : null,
-  };
+  return { sent, inFlight, used: sent + inFlight, resetsAt: capResetsAt(now) };
 }
 
 /**
- * When to look again after the cap deferred something. The oldest send's
- * expiry when there is one; otherwise an hour out, which only happens when
- * the window is full of in-flight rows or the cap is 0.
+ * When the cap has room again after deferring something: the start of
+ * tomorrow, when every slot frees at once, sends and stuck rows alike.
  */
-export function retryAfterCap(window: SendWindow, now: Date = new Date()): string {
-  if (window.freesAt && new Date(window.freesAt).getTime() > now.getTime()) return window.freesAt;
-  return new Date(now.getTime() + HOUR_MS).toISOString();
+export function capResetsAt(now: Date = new Date()): string {
+  return dueOn(now, 1);
 }
 
 /** Email actions claimed more than an hour ago and never resolved. */

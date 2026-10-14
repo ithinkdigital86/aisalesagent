@@ -17,7 +17,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 import { deliverQueuedEmailAction, type DeferReason, type SendEmailResult } from './adapters/email.ts';
-import { loadSendControls, loadSendWindow, retryAfterCap } from './send-controls.ts';
+import { capResetsAt, loadSendControls, loadSendWindow } from './send-controls.ts';
 
 /** Most rows one pass will try to send, across every workspace. */
 export const DELIVERY_BATCH_LIMIT = 50;
@@ -28,7 +28,7 @@ const WORKSPACE_SCAN_LIMIT = 1000;
 export interface HeldWorkspace {
   workspaceId: string;
   reason: DeferReason;
-  /** For the cap: when the window frees a slot. */
+  /** For the cap: the start of tomorrow, when the count starts again. */
   retryAt: string | null;
   /** Due email rows left queued in this workspace after the pass. */
   waiting: number;
@@ -121,7 +121,7 @@ export async function deliverDueEmails(
           result.held.push({
             workspaceId,
             reason: 'daily_cap_reached',
-            retryAt: retryAfterCap(window, now),
+            retryAt: window.resetsAt,
             waiting,
           });
         }
@@ -157,10 +157,7 @@ export async function deliverDueEmails(
           result.held.push({
             workspaceId,
             reason: sent.reason,
-            retryAt:
-              sent.reason === 'daily_cap_reached'
-                ? retryAfterCap(await loadSendWindow(db, workspaceId, now), now)
-                : null,
+            retryAt: sent.reason === 'daily_cap_reached' ? capResetsAt(now) : null,
             waiting: await countWaiting(db, workspaceId, now),
           });
           break;

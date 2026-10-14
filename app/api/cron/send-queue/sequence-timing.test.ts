@@ -294,7 +294,7 @@ test('the third failure along the chain stops the run; failures off the chain do
 
 test('a retry waits for room under the daily cap like any other email', async () => {
   db.rows('workspaces')[0].daily_send_cap = 1;
-  addSent(db, WS, 'someone-else', [2]);
+  addSent(db, WS, 'someone-else', [0]);
   onStep(1);
   addStepAction(db, WS, LEAD, SEQ, 1, { status: 'failed', blockReason: 'resend 500' });
 
@@ -335,7 +335,7 @@ test('a row stuck in sending past the expiry stops the run and is left as it is'
 
 test('a queued step held by the cap keeps the lead waiting however old it is', async () => {
   db.rows('workspaces')[0].daily_send_cap = 1;
-  addSent(db, WS, 'someone-else', [2]);
+  addSent(db, WS, 'someone-else', [0]);
   onStep(1);
   const held = addStepAction(db, WS, LEAD, SEQ, 1, { status: 'queued', createdHoursAgo: 40 * DAY_HOURS });
 

@@ -25,8 +25,8 @@ export interface SendingPanelProps {
   minFitScore: number;
   sent: number;
   inFlight: number;
-  /** When the oldest send in the window ages out, formatted. */
-  freesAtLabel: string | null;
+  /** The start of tomorrow, when the count starts again, formatted. */
+  resetsAtLabel: string;
   stuck: number;
 }
 
@@ -109,7 +109,7 @@ export function SendingPanel(props: SendingPanelProps) {
       <div className="grid gap-4 sm:grid-cols-2">
         <div className="rounded-lg border p-4">
           <div className="text-xs uppercase tracking-wide text-muted-foreground">
-            Sent in the last 24 hours
+            Sent today
           </div>
           <div className="mt-1 font-display text-2xl font-semibold tabular-nums">
             {used} <span className="text-base font-normal text-muted-foreground">/ {props.dailyCap}</span>
@@ -123,7 +123,7 @@ export function SendingPanel(props: SendingPanelProps) {
           <p className="mt-2 text-xs text-muted-foreground">
             {props.inFlight > 0 ? `${props.inFlight} of these mid-send. ` : ''}
             {full
-              ? `Cap reached: queued email waits${props.freesAtLabel ? ` until ${props.freesAtLabel}` : ''}.`
+              ? `Cap reached: queued email waits until ${props.resetsAtLabel}.`
               : `${props.dailyCap - used} more can go before the cap.`}
           </p>
         </div>
@@ -180,8 +180,8 @@ export function SendingPanel(props: SendingPanelProps) {
           {saving ? 'Saving' : 'Save limits'}
         </Button>
         <p className="basis-full text-xs text-muted-foreground">
-          The cap counts emails over a rolling 24 hours; reaching it holds the rest in the queue
-          rather than failing them. Leads below the minimum fit score, and leads not yet scored, are
+          The cap counts emails sent each calendar day, India time; reaching it holds the rest in
+          the queue rather than failing them. Leads below the minimum fit score, and leads not yet scored, are
           not drafted to or put on a sequence.
         </p>
       </form>

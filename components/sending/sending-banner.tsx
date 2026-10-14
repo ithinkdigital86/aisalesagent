@@ -62,12 +62,11 @@ export function SendingBanner({
         <span className="font-medium">Sending is on</span>
       </span>
       <span className="font-mono text-xs text-muted-foreground">
-        {window.used} of {controls.dailyCap} emails in the last 24 hours
+        {window.used} of {controls.dailyCap} emails sent today
       </span>
       {full ? (
         <span className="text-xs text-amber-700 dark:text-amber-400">
-          Daily cap reached; queued email waits
-          {window.freesAt ? ` until ${formatSendTime(window.freesAt)}` : ''}.
+          Daily cap reached; queued email waits until {formatSendTime(window.resetsAt)}.
         </span>
       ) : null}
       {stuck > 0 ? (

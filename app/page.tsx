@@ -146,7 +146,7 @@ export default async function Home() {
           minFitScore={sending.controls.minFitScore}
           sent={sending.window.sent}
           inFlight={sending.window.inFlight}
-          freesAtLabel={sending.window.freesAt ? formatSendTime(sending.window.freesAt) : null}
+          resetsAtLabel={formatSendTime(sending.window.resetsAt)}
           stuck={sending.stuck}
         />
       ) : (

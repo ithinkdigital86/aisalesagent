@@ -55,7 +55,6 @@ import {
   loadSendControls,
   loadSendWindow,
   pausedWorkspaceIds,
-  retryAfterCap,
 } from '@/lib/cadence/send-controls';
 import {
   DUE_BATCH_LIMIT,
@@ -201,7 +200,7 @@ export class EmailBudget {
       .eq('channel', 'email')
       .eq('status', 'queued');
 
-    const entry = { left: cap - window.used - (queued ?? 0), retryAt: retryAfterCap(window, now) };
+    const entry = { left: cap - window.used - (queued ?? 0), retryAt: window.resetsAt };
     this.room.set(workspaceId, entry);
     return entry;
   }
