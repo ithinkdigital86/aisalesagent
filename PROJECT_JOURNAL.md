@@ -624,3 +624,147 @@ variable. Each part was reverted in turn to check a test fails: the old key
 
 **Verification.** `tsc`, `npm test` (270 passing), `npm run lint`,
 `npm run build`. The Resend and database checks above were reads only.
+
+### 2026-10-14 QA fault 6: a step's delay counted from the queue, not the send
+
+**Problem.** When the runner queued step N it set the lead's
+`next_action_at` to now plus step N+1's delay. A draft left awaiting approval
+did not hold anything back, so step N+1 fell due on schedule and could be
+drafted on top of it: a lead could get two emails close together, or out of
+order. The last step also marked the run `completed` the moment it was
+queued, so a final draft that was then rejected still read "finished all
+steps".
+
+**Change.**
+
+- `stepReadiness()` in `lib/cadence/sequence.ts` reads the rows for the step
+  already queued (newest first) and says what they mean for the next one:
+  `run`, `complete`, `wait` (not due yet, or waiting on approval, the queue or
+  `sending`), `retry`, `expire` or `stop`. The runner calls it before fit,
+  consent or any model call, for every lead past step zero.
+- The delay counts calendar days in `DISPLAY_TIME_ZONE` from the send's day
+  (`dueOn()`): sent on the 14th with a three-day delay is due from midnight
+  IST on the 17th. Counting to the second would make every follow-up a day
+  late, because each send happens a few seconds into the daily pass and the
+  send plus exactly three days lands just after the pass three days on.
+- Queueing a step no longer schedules the next. It sets a date to look
+  again: the next pass for a queued row (`nextPass()`, the start of
+  tomorrow), or the day an unapproved draft would expire. Approving or
+  rejecting a sequence draft moves the lead to now (`wakeSequenceLead()` in
+  `approvals.ts`, called from the approvals route), so the next step's clock
+  starts from the send, not from the expiry.
+- The run completes when the last step has been sent, on the pass after.
+- A step that never sends:
+  - rejected by a person: stop as `step_rejected`;
+  - blocked for any other reason (consent, no email): `step_blocked`;
+  - failed (Resend error): sent again as the same message with no new
+    draft, under the cap and the gates like any other email, and stopped as
+    `step_failed` after three failures of that step;
+  - awaiting approval 14 days (`STEP_EXPIRY_DAYS`): the draft is blocked
+    (`block_reason = 'step_expired'`) so it leaves the approvals list, and
+    the run stops as `step_expired`. Only while it is still awaiting
+    approval; one approved in the same moment is let through;
+  - stuck in `sending` 14 days: `step_expired`, row left alone;
+  - queued: waits with no limit, since only the cap or the kill switch
+    holds it and both clear;
+  - no row at all: `step_missing`.
+- The source of `step_missing`: when the action insert failed, the runner
+  still advanced `sequence_step` and the step was lost. It now leaves the lead
+  on its step and looks again on the next pass. A failed draft and a failed
+  read of the step's rows do the same; a failed read is not taken as "no
+  rows".
+- Leads and sequences tables: a running lead past step zero shows what it is
+  held on ("step 2 awaiting approval", "queued to send", "failed to send,
+  retrying") or the due date worked out from the send, instead of
+  `next_action_at`, which is now only when the runner will look again.
+  `lib/cadence/sequence-progress.ts` holds the reads for both the runner and
+  the pages. The editor's delay label now says "Days after the step above is
+  sent".
+- `describeStop()` words the five new reasons.
+
+**Decisions worth knowing.**
+
+- Retries are counted without a new column: a retry copies the failed row's
+  message exactly, so the failures of a step are the failed rows carrying the
+  newest row's body. A fresh draft (a re-enrolment) is a different body, so
+  an earlier enrolment's failures never count against it. If a send path
+  ever rewrites the body of a failed row, this count breaks; a `retry_of`
+  column would be the explicit version.
+- A rejection is not a no to the lead. `enrolLeads` never refused a stopped
+  lead and still does not; a test now pins that for every new reason, and
+  that a won, lost or booked lead is still refused.
+- Leads waiting on approval are looked at once, on their expiry day, not
+  every pass, so a large approvals backlog cannot fill the 50-lead batch.
+  A queued or sent step costs one extra look, the pass after it was queued.
+- Not changed: the fit (1 day) and consent (7 day) deferrals still use
+  24-hour `dueAt`, so with a once-a-day cron a "tomorrow" deferral can miss
+  the next pass by seconds and land a day later. Same cause as above; left
+  for its own change.
+
+**Tests.** 40 new. `sequence.test.ts` (15): `dueOn` in IST and across a
+New York clock change, the seconds-into-the-pass case, and every row of the
+readiness table. `app/api/cron/send-queue/sequence-timing.test.ts` (16), end
+to end through the cron: an unapproved draft holds step 2; step 2 is due
+three days from the send, not the queueing; a same-pass send is looked at the
+next day; completion waits for the send; rejection; re-enrolment after a
+rejection; three failed sends then a stop, with one draft; a retry that goes
+through; a retry under the cap; both expiries; a queued row held by the cap;
+a missing row; a failed insert; a failed read. `approvals.test.ts` (3) for
+the wake-up, and `app/actions/sequences.test.ts` (6) for re-enrolment, which
+needed `lib/cadence/testing/action-doubles.ts` and package swaps in the
+route loader. The fake PostgREST now stamps `created_at` and fills column
+defaults on insert, as Postgres does. With the readiness check disabled 12 of
+the 16 cron tests fail; with the insert fix disabled, its test fails.
+
+**Verification.** `tsc`, `npm test` (310 passing; the sequence tests also
+with `TZ=America/Los_Angeles`), `npm run lint`, `npm run build`. Nothing was
+run against the live database. No migration.
+
+### 2026-10-14 Retries point at what they retry: actions.retry_of
+
+**Problem.** The fault 6 change counted a step's failed sends by matching
+body text: a retry copies the failed message, so the failures were the
+failed rows carrying the newest row's body. That held only while nothing
+rewrote a failed row's body, and said nothing about which row a retry was
+for.
+
+**Change.**
+
+- Migration 0012 adds `actions.retry_of uuid references actions(id) on
+  delete set null`, a check that a row does not point at itself, and a
+  partial index for the foreign key. `types/database.ts` carries the column
+  and the relationship.
+- The runner writes `retry_of` = the failed row's id on every retry, and
+  null on a fresh draft. The message is still copied unchanged.
+- `countFailures()` walks the chain from the step's newest row back through
+  `retry_of` and counts the failed rows on it. A fresh draft ends the chain,
+  so an earlier enrolment's failures still never count, and now neither does
+  any failed row that is not on the chain (a manual draft for the same
+  step). A link to a row that was deleted or is past the 20-row read ends
+  the chain, which can only undercount: one retry more, never an early stop.
+  A loop in hand-edited rows ends the count rather than spinning.
+- `StepAttempt` carries `id` and `retry_of` in place of `body`. The leads and
+  sequences pages read both, so their counts now match the runner's.
+- Behaviour is otherwise unchanged: three failures of a step stop the run as
+  `step_failed`.
+
+**Deploy order.** Apply 0012 before deploying this code. Without the column
+the runner's read of a step fails for every lead past step zero; each is
+looked at again the next day, so nothing is sent twice and nothing is lost,
+but no sequence moves, and the tables fall back to dates. The reverse order
+is safe: the old code never reads the column. Existing rows get null, which
+reads as "first attempt", and that is what every existing row is: nothing
+wrote a retry before this change was made, so there is nothing to backfill.
+
+**Tests.** The pure tests build retry chains instead of matching bodies, with
+two new ones: failed rows off the chain are not counted, and a broken link
+ends the chain while a loop ends the count. In the cron tests the retry loop now also
+checks each retry points at the send before it, a retry that goes through
+points at its failed row, and a new test has an earlier enrolment's three
+chained failures sitting beside this enrolment's two: the third send is
+attempt 3, and its failure stops the run. With the runner writing null for
+`retry_of`, three cron tests fail. The fake's action defaults include
+`retry_of: null`.
+
+**Verification.** `tsc`, `npm test`, `npm run lint`, `npm run build`. The
+migration has not been run in Supabase.
