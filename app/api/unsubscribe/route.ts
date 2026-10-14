@@ -253,10 +253,24 @@ const COPY: Record<Outcome['state'], (address: string) => { heading: string; bod
   }),
 };
 
-/** Check the signature only. Reads nothing and writes nothing. */
-function readToken(request: Request): { workspaceId: string; email: string } | null {
+/**
+ * Check the signature only. Reads nothing and writes nothing.
+ *
+ * A server without UNSUBSCRIBE_SECRET cannot tell a good link from a forged
+ * one. That is our fault, not the link's, so it answers 'error' (500, try
+ * again) rather than 'invalid_token', which would tell the recipient a
+ * working link is broken.
+ */
+function readToken(
+  request: Request
+): { workspaceId: string; email: string } | Extract<Outcome, { state: 'invalid_token' | 'error' }> {
   const token = new URL(request.url).searchParams.get('token');
-  return token ? verifyUnsubscribeToken(token) : null;
+  if (!token) return { state: 'invalid_token' };
+  try {
+    return verifyUnsubscribeToken(token) ?? { state: 'invalid_token' };
+  } catch {
+    return { state: 'error' };
+  }
 }
 
 /**
@@ -267,7 +281,7 @@ function readToken(request: Request): { workspaceId: string; email: string } | n
  */
 async function suppressFromToken(request: Request): Promise<Settled> {
   const verified = readToken(request);
-  if (!verified) return { state: 'invalid_token' };
+  if ('state' in verified) return verified;
 
   const { workspaceId, email } = verified;
   const normalised = email.toLowerCase();
@@ -313,7 +327,7 @@ async function suppressFromToken(request: Request): Promise<Settled> {
  */
 export async function GET(request: Request) {
   const verified = readToken(request);
-  if (!verified) return page({ state: 'invalid_token' });
+  if ('state' in verified) return page(verified);
   return page({ state: 'confirm', email: verified.email.toLowerCase() });
 }
 

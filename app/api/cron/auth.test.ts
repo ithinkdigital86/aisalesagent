@@ -36,6 +36,7 @@ let statements = 0;
 
 beforeEach(() => {
   process.env.CRON_SECRET = SECRET;
+  process.env.UNSUBSCRIBE_SECRET = 'unsubscribe-test-secret';
   // One workspace with something for every route to act on: activity for the
   // review, a queued email, and a lead due for follow-up.
   db = cronDb();

@@ -34,6 +34,7 @@ Production:
 | EMAIL_FROM | An address on your verified Resend domain |
 | NEXT_PUBLIC_APP_URL | Your production URL, no trailing slash |
 | CRON_SECRET | Generate one: `openssl rand -hex 32` |
+| UNSUBSCRIBE_SECRET | Generate a different one: `openssl rand -hex 32`. Signs every unsubscribe link; never change it once real email has gone out, or every link already sent stops working |
 | APOLLO_API_KEY | apollo.io, only needed for sourcing |
 
 Remember: the two NEXT_PUBLIC values are baked in at build time. If you change

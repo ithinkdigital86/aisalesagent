@@ -86,26 +86,50 @@ function appUrl(): string {
   return 'http://localhost:3000';
 }
 
-/** Signed, non-expiring token identifying which address to suppress. */
+/**
+ * The key unsubscribe links are signed with, and nothing else is. Links do not
+ * expire, so this has to outlive every email already sent: rotating it breaks
+ * every link in every inbox, which is why it is not shared with CRON_SECRET.
+ *
+ * Unset throws rather than falling back to an empty key, because anyone can
+ * sign with an empty key and so unsubscribe any address from any workspace.
+ */
+function unsubscribeSecret(): string {
+  const secret = process.env.UNSUBSCRIBE_SECRET;
+  if (!secret) throw new Error('UNSUBSCRIBE_SECRET is not set');
+  return secret;
+}
+
+/**
+ * Signed, non-expiring token identifying which address to suppress. Throws
+ * when UNSUBSCRIBE_SECRET is unset, so no email goes out without a working link.
+ */
 export function unsubscribeToken(workspaceId: string, email: string): string {
   const payload = Buffer.from(
     JSON.stringify({ w: workspaceId, e: email.toLowerCase() })
   ).toString('base64url');
   const signature = crypto
-    .createHmac('sha256', process.env.CRON_SECRET ?? '')
+    .createHmac('sha256', unsubscribeSecret())
     .update(payload)
     .digest('base64url');
   return `${payload}.${signature}`;
 }
 
+/**
+ * The address a token names, or null when the token is malformed or its
+ * signature does not match. Throws when UNSUBSCRIBE_SECRET is unset: that is
+ * a fault on our side, and the caller must not tell the recipient the link is
+ * invalid when it is not.
+ */
 export function verifyUnsubscribeToken(
   token: string
 ): { workspaceId: string; email: string } | null {
+  const secret = unsubscribeSecret();
   const [payload, signature] = token.split('.');
   if (!payload || !signature) return null;
 
   const expected = crypto
-    .createHmac('sha256', process.env.CRON_SECRET ?? '')
+    .createHmac('sha256', secret)
     .update(payload)
     .digest('base64url');
   const given = Buffer.from(signature);
@@ -240,6 +264,8 @@ export async function sendEmail(
     return { status: 'blocked', actionId: (data?.id as string) ?? null, reason: 'no_email' };
   }
 
+  // Signed before the row is written, so an unset UNSUBSCRIBE_SECRET throws
+  // with nothing queued or claimed.
   const url = unsubscribeUrl(workspaceId, email);
   const bodyWithUnsub = withUnsubscribe(input.body, url);
 
@@ -327,6 +353,12 @@ export async function deliverQueuedEmailAction(
   db: SupabaseClient,
   action: QueuedEmailAction
 ): Promise<SendEmailResult> {
+  // Before the claim. The link is signed after it, and a row claimed and then
+  // abandoned sits in 'sending' for good, never sent and never retried. This
+  // throws with the row still queued, and the pass fails like any other
+  // configuration fault.
+  unsubscribeSecret();
+
   const claim = await claimForSending(db, action.id);
   if (!claim.claimed) return claim.result;
 

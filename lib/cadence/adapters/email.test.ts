@@ -25,6 +25,7 @@ let onSend: (() => Promise<void>) | null = null;
 const realFetch = globalThis.fetch;
 
 beforeEach(() => {
+  process.env.UNSUBSCRIBE_SECRET = 'unsubscribe-test-secret';
   calls = [];
   onSend = null;
   globalThis.fetch = (async (_url: string, init: RequestInit) => {

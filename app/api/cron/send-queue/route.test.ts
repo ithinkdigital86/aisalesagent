@@ -47,6 +47,7 @@ const DRAFT: AgentResult = { ok: true, data: { subject: 'Quick question', body: 
 
 beforeEach(() => {
   process.env.CRON_SECRET = SECRET;
+  process.env.UNSUBSCRIBE_SECRET = 'unsubscribe-test-secret';
   db = cronDb();
   useDb(db);
   scriptAgents(() => DRAFT);

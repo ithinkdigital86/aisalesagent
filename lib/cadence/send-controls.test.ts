@@ -25,6 +25,7 @@ let resendCalls: string[] = [];
 const realFetch = globalThis.fetch;
 
 beforeEach(() => {
+  process.env.UNSUBSCRIBE_SECRET = 'unsubscribe-test-secret';
   resendCalls = [];
   globalThis.fetch = (async (_url: string, init: RequestInit) => {
     resendCalls.push((init.headers as Record<string, string>)['Idempotency-Key']);

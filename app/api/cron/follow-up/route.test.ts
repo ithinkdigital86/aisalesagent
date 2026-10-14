@@ -50,6 +50,7 @@ const SUPPRESS: AgentResult = {
 
 beforeEach(() => {
   process.env.CRON_SECRET = SECRET;
+  process.env.UNSUBSCRIBE_SECRET = 'unsubscribe-test-secret';
   db = cronDb();
   useDb(db);
   scriptAgents(() => WAIT);

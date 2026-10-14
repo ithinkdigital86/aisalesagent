@@ -47,6 +47,7 @@ file called `.env.local` which stays on your machine and is never uploaded.
 | EMAIL_FROM | an address on your Resend-verified domain (optional for now) |
 | NEXT_PUBLIC_APP_URL | put exactly: http://localhost:3000 |
 | CRON_SECRET | any long random text, for example run: `openssl rand -hex 32` |
+| UNSUBSCRIBE_SECRET | a different long random text, made the same way. Email will not send without it |
 | TWILIO_* and VAPI_API_KEY | leave blank (voice is not active) |
 
 Rules for pasting: one line each, no quotes, no spaces around the `=`, no
