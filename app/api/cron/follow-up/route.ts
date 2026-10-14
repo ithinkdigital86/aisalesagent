@@ -1,7 +1,7 @@
 // app/api/cron/follow-up/route.ts
 //
-// Runs every 6 hours. Reads every lead that is due, asks the Follow-up
-// manager what to do, and applies the decision.
+// Runs once a day (vercel.json). Reads every lead that is due, asks the
+// Follow-up manager what to do, and applies the decision.
 //
 // Leads on a running sequence are skipped: the sequence runner owns their
 // next_action_at, and two schedulers writing the same column is how a lead
@@ -21,9 +21,13 @@ import { runAgent } from '@/lib/cadence/runtime';
 import { evaluateConsent, type Channel } from '@/lib/cadence/consent';
 import { isCronRequest } from '@/lib/cadence/cron-auth';
 import { inList, pausedWorkspaceIds } from '@/lib/cadence/send-controls';
+import { dueOn } from '@/lib/cadence/sequence';
 import { blockPendingActions, writeSuppression } from '@/lib/cadence/suppression';
 
 export const maxDuration = 300;
+
+/** Calendar days a lead waits when the gate refuses the channel proposed. */
+const CHANNEL_BLOCKED_DAYS = 7;
 
 export async function GET(request: Request) {
   if (!isCronRequest(request)) {
@@ -108,13 +112,17 @@ export async function GET(request: Request) {
       channelOk = verdict.allowed;
     }
 
+    // The wait counts calendar days, as a sequence step's delay does: this
+    // cron runs once a day, and now plus 24 hours lands seconds after
+    // tomorrow's run, so every wait would slip a whole day. A part day rounds
+    // up, so the lead never comes back before the wait the manager asked for.
+    const waitDays = Math.max(Math.ceil(d.wait_hours / 24), channelOk ? 0 : CHANNEL_BLOCKED_DAYS);
+
     await db
       .from('leads')
       .update({
         stage: d.new_stage,
-        next_action_at: new Date(
-          Date.now() + Math.max(d.wait_hours, channelOk ? 0 : 168) * 3_600_000
-        ).toISOString(),
+        next_action_at: dueOn(new Date(), waitDays),
       })
       .eq('id', lead.id);
 

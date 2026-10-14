@@ -96,11 +96,6 @@ export function nextStep(steps: SequenceStep[], currentStep: number): SequenceSt
   return steps[wanted - 1] ?? null;
 }
 
-/** This many whole days of 24 hours after `from`. */
-export function dueAt(from: Date, delayDays: number): string {
-  return new Date(from.getTime() + delayDays * 86_400_000).toISOString();
-}
-
 /**
  * The start of the day `days` calendar days after `from`'s day, as days fall
  * in a named zone. This is when a step falls due: its delay counts calendar
@@ -111,7 +106,8 @@ export function dueAt(from: Date, delayDays: number): string {
  * days lands a few seconds after the pass three days later, and every
  * follow-up would slip a whole day. Counting days means a step sent on the
  * 14th with a three-day delay is due on the 17th, which is also the date the
- * tables show.
+ * tables show. Anything else a daily cron waits on (a deferral, enrolment,
+ * the Follow-up manager's wait) counts the same way, for the same reason.
  */
 export function dueOn(from: Date, days: number, timeZone: string = DISPLAY_TIME_ZONE): string {
   const { year, month, day } = zoneParts(from, timeZone);

@@ -60,7 +60,6 @@ import {
 import {
   DUE_BATCH_LIMIT,
   STEP_EXPIRY_DAYS,
-  dueAt,
   dueOn,
   nextPass,
   nextStep,
@@ -74,13 +73,13 @@ import type { Database, Json, TablesUpdate } from '@/types/database';
 
 type Db = SupabaseClient<Database>;
 
-/** How long a step waits when the consent gate says the channel is closed. */
+/** Calendar days a step waits when the consent gate says the channel is closed. */
 const BLOCKED_RETRY_DAYS = 7;
 
 /**
- * How long a step waits when the lead is below the minimum fit score. Short,
- * because the cure is a rescore or a lower minimum, and either should let the
- * lead carry on from where it is rather than a week later.
+ * Calendar days a step waits when the lead is below the minimum fit score.
+ * Short, because the cure is a rescore or a lower minimum, and either should
+ * let the lead carry on from where it is rather than a week later.
  */
 const BELOW_FIT_RETRY_DAYS = 1;
 
@@ -360,10 +359,12 @@ export async function runSequenceStep(
 
   // Below the minimum, or never scored: not drafted to. The lead keeps its
   // place and is looked at again tomorrow, so a rescore or a lower minimum
-  // lets it carry on from this step rather than start over.
+  // lets it carry on from this step rather than start over. Tomorrow is the
+  // calendar day, as for a step's delay: now plus 24 hours lands seconds
+  // after tomorrow's pass and would slip a whole day every time.
   const fit = checkFit(lead.fit_score, controls.minFitScore);
   if (!fit.ok) {
-    return deferLead(db, lead, fit.reason, dueAt(new Date(), BELOW_FIT_RETRY_DAYS));
+    return deferLead(db, lead, fit.reason, dueOn(new Date(), BELOW_FIT_RETRY_DAYS));
   }
 
   // Not a gate, a saving. The adapter re-runs this at send time and its
@@ -375,7 +376,7 @@ export async function runSequenceStep(
     channel,
   });
   if (!verdict.allowed) {
-    return deferLead(db, lead, verdict.reason, dueAt(new Date(), BLOCKED_RETRY_DAYS));
+    return deferLead(db, lead, verdict.reason, dueOn(new Date(), BLOCKED_RETRY_DAYS));
   }
 
   // An email step that goes straight to the queue needs a slot under the

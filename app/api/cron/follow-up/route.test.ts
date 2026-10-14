@@ -30,6 +30,7 @@ import {
   type ResendStub,
 } from '../../../../lib/cadence/testing/cron-world.ts';
 import type { FakeDb } from '../../../../lib/cadence/testing/fake-postgrest.ts';
+import { dueOn } from '../../../../lib/cadence/sequence.ts';
 
 registerRouteLoader(CRON_DOUBLES);
 const { GET } = await import('./route.ts');
@@ -65,6 +66,18 @@ afterEach(() => {
 async function run() {
   const response = await GET(cronRequest());
   return { status: response.status, body: await response.json() };
+}
+
+/**
+ * A run, and the start of the day `days` from the day it ran. Both ends of
+ * the run are read, because the route reads the clock in between and a run
+ * can straddle midnight in India.
+ */
+async function runDated() {
+  const before = new Date();
+  const result = await run();
+  const after = new Date();
+  return { ...result, dueIn: (days: number) => [dueOn(before, days), dueOn(after, days)] };
 }
 
 const asked = () => agentCalls.map((call) => call.leadId);
@@ -142,6 +155,61 @@ test('does not filter by fit score: below-minimum and unscored leads still reach
   await run();
 
   assert.deepEqual(asked().sort(), ['low', 'unscored']);
+});
+
+// ---------------------------------------------------------------
+// When the lead is due again
+// ---------------------------------------------------------------
+
+/** The manager's decision, with the wait and channel given. */
+const decide = (wait_hours: number, next_action = 'wait', next_channel = 'none'): AgentResult => ({
+  ok: true,
+  data: { next_action, next_channel, wait_hours, new_stage: 'engaged', sentiment: 'neutral' },
+});
+
+test('a wait counts calendar days in India, so a day is the start of tomorrow, not 24 hours on', async () => {
+  // This cron runs once a day. Now plus 24 hours lands seconds after
+  // tomorrow's run, and the lead would wait two days instead of one.
+  addWorkspace(db, 'ws');
+  addLead(db, 'ws', 'day');
+  addLead(db, 'ws', 'week');
+  addLead(db, 'ws', 'part');
+  addLead(db, 'ws', 'none');
+  const waits: Record<string, number> = { day: 24, week: 168, part: 30, none: 0 };
+  scriptAgents((call) => decide(waits[call.leadId as string]));
+
+  const { status, dueIn } = await runDated();
+
+  assert.equal(status, 200);
+  const dueAgain = (id: string) => leadOf(db, id).next_action_at as string;
+  assert.ok(dueIn(1).includes(dueAgain('day')), 'a day: from the start of tomorrow');
+  assert.ok(dueIn(7).includes(dueAgain('week')), 'a week: from the start of the day a week on');
+  // A part day rounds up: never back before the wait the manager asked for.
+  assert.ok(dueIn(2).includes(dueAgain('part')), '30 hours: from the start of the day after tomorrow');
+  // No wait: due from the start of today, so the next run takes it.
+  assert.ok(dueIn(0).includes(dueAgain('none')), 'no wait: due at once');
+});
+
+test("a channel the gate refuses waits seven calendar days, or the manager's wait if longer", async () => {
+  addWorkspace(db, 'ws');
+  // No phone and no DLT registration: SMS is refused.
+  addLead(db, 'ws', 'short');
+  addLead(db, 'ws', 'long');
+  scriptAgents((call) =>
+    call.leadId === 'short' ? decide(24, 'switch_channel', 'sms') : decide(240, 'switch_channel', 'sms')
+  );
+
+  const { body, dueIn } = await runDated();
+
+  assert.deepEqual(
+    body.handled.map((h: { leadId: string; channelBlocked: boolean }) => [h.leadId, h.channelBlocked]),
+    [
+      ['short', true],
+      ['long', true],
+    ]
+  );
+  assert.ok(dueIn(7).includes(leadOf(db, 'short').next_action_at as string), 'a week, not 168 hours');
+  assert.ok(dueIn(10).includes(leadOf(db, 'long').next_action_at as string), 'the longer wait wins');
 });
 
 // ---------------------------------------------------------------

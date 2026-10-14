@@ -17,7 +17,7 @@ import { z } from 'zod';
 import {
   MAX_STEPS,
   TERMINAL_STAGES,
-  dueAt,
+  dueOn,
   parseSteps,
   stepsSchema,
 } from '@/lib/cadence/sequence';
@@ -242,14 +242,15 @@ export async function enrolLeads(input: {
     }
 
     // Step zero: nothing queued yet, and the first step falls due on its own
-    // delay, which is normally the same instant.
+    // delay, counted in calendar days like every later step. The delay is
+    // normally 0, which is the start of today: due at once.
     const { error: updateErr } = await db
       .from('leads')
       .update({
         assigned_sequence_id: sequenceId,
         sequence_step: 0,
         sequence_stopped_reason: null,
-        next_action_at: dueAt(new Date(), steps[0].delay_days),
+        next_action_at: dueOn(new Date(), steps[0].delay_days),
       })
       .eq('workspace_id', workspaceId)
       .in('id', eligible);

@@ -16,7 +16,6 @@ import {
   countFailures,
   describeProgress,
   describeStop,
-  dueAt,
   dueOn,
   formatDueDate,
   nextStep,
@@ -114,12 +113,6 @@ test('a one-step sequence is finished after its only step', () => {
   assert.equal(nextStep([step(1)], 1), null);
 });
 
-test('dueAt counts whole 24-hour days', () => {
-  const from = new Date('2026-09-23T09:00:00.000Z');
-  assert.equal(dueAt(from, 0), '2026-09-23T09:00:00.000Z');
-  assert.equal(dueAt(from, 3), '2026-09-26T09:00:00.000Z');
-});
-
 test('formatDueDate shows the day as it falls in India, whatever the host zone', () => {
   // 22:30 UTC is 04:00 the next morning in Kolkata.
   const value = '2026-10-16T22:30:00.000Z';
@@ -189,7 +182,19 @@ test('a step sent seconds into a pass is due on the pass that many days later, n
   assert.equal(stepReadiness(attempts, 3, pass(16)).kind, 'wait');
   assert.equal(stepReadiness(attempts, 3, pass(17)).kind, 'run');
   // The bare 72 hours would have missed the pass on the 17th.
-  assert.ok(dueAt(sent, 3) > pass(17).toISOString());
+  assert.ok(new Date(sent.getTime() + 3 * 86_400_000) > pass(17));
+});
+
+test('a deferral made seconds into a pass is due on the pass that many days later', () => {
+  // The fit (1 day) and consent (7 day) deferrals, and the follow-up wait,
+  // are made during a daily pass and count calendar days the same way.
+  const pass = (day: number) => new Date(Date.UTC(2026, 9, day, 3, 30, 0));
+  const deferred = new Date(pass(14).getTime() + 5_000);
+  assert.ok(dueOn(deferred, 1) <= pass(15).toISOString(), 'tomorrow');
+  assert.ok(dueOn(deferred, 7) <= pass(21).toISOString(), 'a week on');
+  // And not the pass before: a deferral is not cut short by a day.
+  assert.ok(dueOn(deferred, 1) > pass(14).toISOString());
+  assert.ok(dueOn(deferred, 7) > pass(20).toISOString());
 });
 
 test('dueOn finds midnight across a clock change in a zone that has one', () => {

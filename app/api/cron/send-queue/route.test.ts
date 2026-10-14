@@ -34,6 +34,7 @@ import {
   type ResendStub,
 } from '../../../../lib/cadence/testing/cron-world.ts';
 import type { FakeDb } from '../../../../lib/cadence/testing/fake-postgrest.ts';
+import { dueOn } from '../../../../lib/cadence/sequence.ts';
 
 registerRouteLoader(CRON_DOUBLES);
 const { GET } = await import('./route.ts');
@@ -62,6 +63,18 @@ afterEach(() => {
 async function run() {
   const response = await GET(cronRequest());
   return { status: response.status, body: await response.json() };
+}
+
+/**
+ * A run, and the start of the day `days` from the day it ran. Both ends of
+ * the run are read, because the runner reads the clock in between and a run
+ * can straddle midnight in India.
+ */
+async function runDated() {
+  const before = new Date();
+  const result = await run();
+  const after = new Date();
+  return { ...result, dueIn: (days: number) => [dueOn(before, days), dueOn(after, days)] };
 }
 
 /** A workspace with a sequence, and a lead with no email waiting yet. */
@@ -202,7 +215,7 @@ test('leads below the minimum and unscored leads are not drafted to', async () =
   dueOnSequence('ws', 'unscored', null);
   dueOnSequence('ws', 'at-min', 60);
 
-  const { status, body } = await run();
+  const { status, body, dueIn } = await runDated();
 
   assert.equal(status, 200);
   assert.deepEqual(drafted(), ['at-min']);
@@ -213,9 +226,9 @@ test('leads below the minimum and unscored leads are not drafted to', async () =
     const lead = leadOf(db, id);
     assert.equal(lead.sequence_step, 0, `${id} keeps its place in the sequence`);
     assert.equal(lead.stage, 'qualified');
-    // Looked at again in a day, so a rescore lets it carry on.
-    const wait = new Date(lead.next_action_at as string).getTime() - Date.now();
-    assert.ok(wait > DAY - 60_000 && wait <= DAY, `${id} deferred by a day`);
+    // Looked at again tomorrow, so a rescore lets it carry on. Tomorrow is
+    // the calendar day in India, not 24 hours from now.
+    assert.ok(dueIn(1).includes(lead.next_action_at as string), `${id} due from the start of tomorrow`);
     assert.equal(db.rows('actions').filter((row) => row.lead_id === id).length, 0, `nothing queued for ${id}`);
   }
 
@@ -223,6 +236,28 @@ test('leads below the minimum and unscored leads are not drafted to', async () =
   const step = db.rows('actions').find((row) => row.lead_id === 'at-min')!;
   assert.equal(step.status, 'sent');
   assert.deepEqual(network.sent, [step.id]);
+});
+
+// ---------------------------------------------------------------
+// Consent
+// ---------------------------------------------------------------
+
+test('a lead the consent gate refuses waits seven calendar days, not 168 hours', async () => {
+  workspace('ws');
+  dueOnSequence('ws', 'revoked');
+  for (const record of db.rows('consent_records').filter((row) => row.lead_id === 'revoked')) {
+    record.revoked_at = new Date().toISOString();
+  }
+
+  const { body, dueIn } = await runDated();
+
+  assert.equal(agentCalls.length, 0, 'nothing drafted for a channel that is closed');
+  const outcome = outcomeOf(body, 'revoked');
+  assert.equal(outcome?.status, 'deferred');
+  const lead = leadOf(db, 'revoked');
+  assert.equal(lead.sequence_step, 0, 'keeps its place in the sequence');
+  assert.ok(dueIn(7).includes(lead.next_action_at as string), 'due from the start of the day a week on');
+  assert.equal(outcome?.nextAt, lead.next_action_at);
 });
 
 // ---------------------------------------------------------------

@@ -17,6 +17,7 @@ import {
 } from '../../lib/cadence/testing/action-doubles.ts';
 import { addLead, addSequence, addWorkspace, cronDb, leadOf } from '../../lib/cadence/testing/cron-world.ts';
 import type { FakeDb } from '../../lib/cadence/testing/fake-postgrest.ts';
+import { dueOn } from '../../lib/cadence/sequence.ts';
 
 registerRouteLoader(ACTION_DOUBLES);
 const { enrolLeads } = await import('./sequences.ts');
@@ -66,4 +67,33 @@ test('a lead whose stage ended the run is still refused', async () => {
   assert.equal(result.ok, false);
   assert.deepEqual(result.skipped, [{ leadId: LEAD, reason: 'lost' }]);
   assert.equal(leadOf(db, LEAD).sequence_stopped_reason, 'stage:lost');
+});
+
+// ---------------------------------------------------------------
+// When step one falls due
+// ---------------------------------------------------------------
+
+test('step one with no delay is due at once', async () => {
+  addLead(db, WS, LEAD, { stage: 'qualified', nextActionAt: null });
+
+  const result = await enrolLeads({ workspaceId: WS, sequenceId: SEQ, leadIds: [LEAD] });
+
+  assert.equal(result.ok, true, result.error);
+  const due = leadOf(db, LEAD).next_action_at as string;
+  assert.ok(new Date(due).getTime() <= Date.now(), 'due on the next pass');
+});
+
+test("step one's delay counts calendar days in India, like every later step", async () => {
+  const delayed = '20000000-0000-4000-8000-000000000002';
+  addSequence(db, WS, delayed, [{ delay_days: 2 }, { delay_days: 3 }]);
+  addLead(db, WS, LEAD, { stage: 'qualified', nextActionAt: null });
+
+  const before = new Date();
+  const result = await enrolLeads({ workspaceId: WS, sequenceId: delayed, leadIds: [LEAD] });
+  const after = new Date();
+
+  assert.equal(result.ok, true, result.error);
+  // The start of the day two days on, not 48 hours from now, which the
+  // daily pass two days on would miss by however long it ran before now.
+  assert.ok([dueOn(before, 2), dueOn(after, 2)].includes(leadOf(db, LEAD).next_action_at as string));
 });
