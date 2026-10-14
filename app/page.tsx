@@ -4,8 +4,11 @@ import { redirect } from 'next/navigation';
 import { ensureWorkspace } from '@/app/actions/auth';
 import { RecentActivity, type RecentAction } from '@/components/dashboard/recent-activity';
 import { RunButtons } from '@/components/dashboard/run-buttons';
+import { SendingPanel } from '@/components/dashboard/sending-panel';
+import { SendingBanner } from '@/components/sending/sending-banner';
 import { SignOutButton } from '@/components/auth/sign-out-button';
 import { costUsd } from '@/lib/cadence/pricing';
+import { formatSendTime, loadSendStatus } from '@/lib/cadence/send-controls';
 import { supabaseServer } from '@/lib/supabase/server';
 
 const STAGE_ORDER = [
@@ -81,6 +84,10 @@ export default async function Home() {
         .limit(8),
     ]);
 
+  // A failed read shows as "could not be read", which the banner treats as
+  // paused, rather than taking the dashboard down with it.
+  const sending = await loadSendStatus(db, workspaceId).catch(() => null);
+
   const totalLeads = leads?.length ?? 0;
   const byStage: Record<string, number> = {};
   for (const lead of leads ?? []) byStage[lead.stage] = (byStage[lead.stage] ?? 0) + 1;
@@ -127,8 +134,24 @@ export default async function Home() {
           <h1 className="text-3xl font-semibold tracking-tight">{workspace?.name ?? 'Workspace'}</h1>
           <p className="text-sm text-muted-foreground">Signed in as {user.email}</p>
         </div>
-        <RunButtons workspaceId={workspaceId} />
+        <RunButtons workspaceId={workspaceId} paused={sending?.controls.paused ?? true} />
       </div>
+
+      {sending ? (
+        <SendingPanel
+          workspaceId={workspaceId}
+          paused={sending.controls.paused}
+          pausedAtLabel={sending.controls.pausedAt ? formatSendTime(sending.controls.pausedAt) : null}
+          dailyCap={sending.controls.dailyCap}
+          minFitScore={sending.controls.minFitScore}
+          sent={sending.window.sent}
+          inFlight={sending.window.inFlight}
+          freesAtLabel={sending.window.freesAt ? formatSendTime(sending.window.freesAt) : null}
+          stuck={sending.stuck}
+        />
+      ) : (
+        <SendingBanner status={null} linkToDashboard={false} />
+      )}
 
       <nav className="flex flex-wrap gap-3">
         {[

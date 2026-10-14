@@ -27,6 +27,13 @@
 // Every send still passes the consent gate in the adapter at send time. The
 // gate call in here is an optimisation, not a second gate: it avoids spending
 // a model call on a draft that could not legally be delivered.
+//
+// The workspace's limits (migration 0011) are checked here before anything
+// else. The kill switch leaves a paused workspace's leads exactly as they
+// were. The minimum fit score is a rule, not a saving: a lead below it is
+// never drafted to, whatever its consent. The daily cap is a saving again,
+// like the gate call: the adapter's claim enforces it, and this only avoids
+// drafting more email than the cap will let out today.
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -34,6 +41,14 @@ import { evaluateConsent, type Channel } from '@/lib/cadence/consent';
 import { loadActiveIcp } from '@/lib/cadence/icp';
 import { runAgent } from '@/lib/cadence/runtime';
 import type { AgentSlug } from '@/lib/cadence/roster';
+import {
+  checkFit,
+  inList,
+  loadSendControls,
+  loadSendWindow,
+  pausedWorkspaceIds,
+  retryAfterCap,
+} from '@/lib/cadence/send-controls';
 import {
   DUE_BATCH_LIMIT,
   dueAt,
@@ -48,6 +63,13 @@ type Db = SupabaseClient<Database>;
 
 /** How long a step waits when the consent gate says the channel is closed. */
 const BLOCKED_RETRY_DAYS = 7;
+
+/**
+ * How long a step waits when the lead is below the minimum fit score. Short,
+ * because the cure is a rescore or a lower minimum, and either should let the
+ * lead carry on from where it is rather than a week later.
+ */
+const BELOW_FIT_RETRY_DAYS = 1;
 
 /**
  * Read the stop signals for one lead. Three reads, because the six conditions
@@ -110,12 +132,13 @@ export interface DueLead {
   workspace_id: string;
   stage: string;
   email: string | null;
+  fit_score: number | null;
   assigned_sequence_id: string | null;
   sequence_step: number;
 }
 
 export const DUE_LEAD_COLUMNS =
-  'id, workspace_id, stage, email, assigned_sequence_id, sequence_step';
+  'id, workspace_id, stage, email, fit_score, assigned_sequence_id, sequence_step';
 
 export type StepOutcome =
   | { status: 'stopped'; reason: string }
@@ -129,9 +152,61 @@ export type StepOutcome =
     }
   /** Nothing was queued and the step will be tried again on this date. */
   | { status: 'deferred'; reason: string; nextAt: string }
+  /** The kill switch is on. Nothing was written for this lead. */
+  | { status: 'paused' }
   | { status: 'failed'; reason: string };
 
 type Draft = { subject?: string; body: string };
+
+/**
+ * How many more emails one pass may queue per workspace before the daily cap
+ * would hold them. Read once per workspace per pass and counted down as steps
+ * are queued, because a step queued now is delivered later in the same pass
+ * and the window count cannot see it yet.
+ */
+export class EmailBudget {
+  private room = new Map<string, { left: number; retryAt: string }>();
+  private db: Db;
+
+  constructor(db: Db) {
+    this.db = db;
+  }
+
+  /** Room left, and when to come back if there is none. */
+  async check(workspaceId: string, cap: number): Promise<{ left: number; retryAt: string }> {
+    const known = this.room.get(workspaceId);
+    if (known) return known;
+
+    const now = new Date();
+    const window = await loadSendWindow(this.db, workspaceId, now);
+    // Email already queued is spoken for: it takes a slot when it is sent.
+    const { count: queued } = await this.db
+      .from('actions')
+      .select('id', { count: 'exact', head: true })
+      .eq('workspace_id', workspaceId)
+      .eq('channel', 'email')
+      .eq('status', 'queued');
+
+    const entry = { left: cap - window.used - (queued ?? 0), retryAt: retryAfterCap(window, now) };
+    this.room.set(workspaceId, entry);
+    return entry;
+  }
+
+  take(workspaceId: string): void {
+    const known = this.room.get(workspaceId);
+    if (known) known.left -= 1;
+  }
+}
+
+/** Nothing queued; try the same step again at nextAt. */
+async function deferLead(db: Db, lead: DueLead, reason: string, nextAt: string): Promise<StepOutcome> {
+  await db
+    .from('leads')
+    .update({ next_action_at: nextAt })
+    .eq('id', lead.id)
+    .eq('workspace_id', lead.workspace_id);
+  return { status: 'deferred', reason, nextAt };
+}
 
 /** Record why a run ended and hand the lead back to the Follow-up manager. */
 async function stop(db: Db, lead: DueLead, reason: string): Promise<StepOutcome> {
@@ -151,8 +226,19 @@ async function stop(db: Db, lead: DueLead, reason: string): Promise<StepOutcome>
  * exactly one action, or moves the lead's date forward, so a lead can never
  * be left due with nothing written.
  */
-export async function runSequenceStep(db: Db, lead: DueLead): Promise<StepOutcome> {
+export async function runSequenceStep(
+  db: Db,
+  lead: DueLead,
+  budget: EmailBudget = new EmailBudget(db)
+): Promise<StepOutcome> {
   if (!lead.assigned_sequence_id) return { status: 'failed', reason: 'not_on_a_sequence' };
+
+  // The kill switch, read fresh for every lead rather than once per pass: a
+  // pass with model calls in it runs for minutes, and the switch has to take
+  // effect on the next lead, not the next tick. A workspace that cannot be
+  // read is treated as paused.
+  const controls = await loadSendControls(db, lead.workspace_id);
+  if (!controls || controls.paused) return { status: 'paused' };
 
   // The stop check runs here, at send time, not when the step was scheduled.
   // Between the two a lead can reply, unsubscribe, bounce or be closed, and
@@ -177,6 +263,14 @@ export async function runSequenceStep(db: Db, lead: DueLead): Promise<StepOutcom
 
   const channel = step.channel;
 
+  // Below the minimum, or never scored: not drafted to. The lead keeps its
+  // place and is looked at again tomorrow, so a rescore or a lower minimum
+  // lets it carry on from this step rather than start over.
+  const fit = checkFit(lead.fit_score, controls.minFitScore);
+  if (!fit.ok) {
+    return deferLead(db, lead, fit.reason, dueAt(new Date(), BELOW_FIT_RETRY_DAYS));
+  }
+
   // Not a gate, a saving. The adapter re-runs this at send time and its
   // verdict is the one that decides whether anything leaves. Checking here
   // only avoids paying for a draft that cannot be delivered today.
@@ -186,13 +280,16 @@ export async function runSequenceStep(db: Db, lead: DueLead): Promise<StepOutcom
     channel,
   });
   if (!verdict.allowed) {
-    const nextAt = dueAt(new Date(), BLOCKED_RETRY_DAYS);
-    await db
-      .from('leads')
-      .update({ next_action_at: nextAt })
-      .eq('id', lead.id)
-      .eq('workspace_id', lead.workspace_id);
-    return { status: 'deferred', reason: verdict.reason, nextAt };
+    return deferLead(db, lead, verdict.reason, dueAt(new Date(), BLOCKED_RETRY_DAYS));
+  }
+
+  // An email step that goes straight to the queue needs a slot under the
+  // cap. One that waits for approval takes no slot until it is approved and
+  // sent, and the claim counts it then.
+  const queuesEmail = channel === 'email' && !step.requires_approval && !verdict.requiresApproval;
+  if (queuesEmail) {
+    const room = await budget.check(lead.workspace_id, controls.dailyCap);
+    if (room.left <= 0) return deferLead(db, lead, 'daily_cap_reached', room.retryAt);
   }
 
   // The message itself. Same agent, same prompt, same review as the manual
@@ -240,6 +337,7 @@ export async function runSequenceStep(db: Db, lead: DueLead): Promise<StepOutcom
     })
     .select('id')
     .single();
+  if (queuesEmail && action) budget.take(lead.workspace_id);
 
   const following = nextStep(steps, step.step);
   const nextAt = following ? dueAt(new Date(), following.delay_days) : null;
@@ -302,7 +400,11 @@ export interface SequencePassResult {
   queued: number;
   stopped: number;
   deferred: number;
+  /** Leads left alone because their workspace was paused mid-pass. */
+  paused: number;
   failed: number;
+  /** Workspaces skipped whole because their kill switch was on. */
+  pausedWorkspaces: number;
   leads: Array<{ leadId: string; outcome: StepOutcome }>;
 }
 
@@ -313,11 +415,35 @@ export interface SequencePassResult {
  *
  * `workspaceId` scopes the pass to one workspace for the manual trigger; the
  * cron omits it and runs across all of them.
+ *
+ * Paused workspaces are left out of the query rather than skipped lead by
+ * lead, so their due leads cannot fill the batch and starve everyone else.
  */
 export async function runDueSequenceSteps(
   db: Db,
   opts: { workspaceId?: string; limit?: number } = {}
 ): Promise<SequencePassResult> {
+  const result: SequencePassResult = {
+    due: 0,
+    queued: 0,
+    stopped: 0,
+    deferred: 0,
+    paused: 0,
+    failed: 0,
+    pausedWorkspaces: 0,
+    leads: [],
+  };
+
+  const paused = await pausedWorkspaceIds(db);
+  if (opts.workspaceId) {
+    if (paused.includes(opts.workspaceId)) {
+      result.pausedWorkspaces = 1;
+      return result;
+    }
+  } else {
+    result.pausedWorkspaces = paused.length;
+  }
+
   let query = db
     .from('leads')
     .select(DUE_LEAD_COLUMNS)
@@ -327,20 +453,14 @@ export async function runDueSequenceSteps(
     .order('next_action_at', { ascending: true })
     .limit(opts.limit ?? DUE_BATCH_LIMIT);
   if (opts.workspaceId) query = query.eq('workspace_id', opts.workspaceId);
+  else if (paused.length > 0) query = query.not('workspace_id', 'in', inList(paused));
 
   const { data: due } = await query;
+  result.due = due?.length ?? 0;
 
-  const result: SequencePassResult = {
-    due: due?.length ?? 0,
-    queued: 0,
-    stopped: 0,
-    deferred: 0,
-    failed: 0,
-    leads: [],
-  };
-
+  const budget = new EmailBudget(db);
   for (const lead of (due ?? []) as DueLead[]) {
-    const outcome = await runSequenceStep(db, lead);
+    const outcome = await runSequenceStep(db, lead, budget);
     result[outcome.status] += 1;
     result.leads.push({ leadId: lead.id, outcome });
   }

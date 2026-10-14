@@ -1,7 +1,9 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
+import { SendingBanner } from '@/components/sending/sending-banner';
 import { parseSteps } from '@/lib/cadence/sequence';
+import { loadSendStatus } from '@/lib/cadence/send-controls';
 import { supabaseServer } from '@/lib/supabase/server';
 import { SequenceManager, type EnrolledLead, type SequenceRow } from './sequence-manager';
 
@@ -38,6 +40,8 @@ export default async function SequencesPage() {
     .not('assigned_sequence_id', 'is', null)
     .order('next_action_at', { ascending: true, nullsFirst: false })
     .limit(500);
+
+  const sending = await loadSendStatus(db, workspace.id).catch(() => null);
 
   const rows: SequenceRow[] = (sequences ?? []).map((sequence) => ({
     id: sequence.id,
@@ -86,6 +90,8 @@ export default async function SequencesPage() {
           ; the send queue drives the steps from there.
         </p>
       </div>
+
+      <SendingBanner status={sending} />
 
       <SequenceManager workspaceId={workspace.id} sequences={rows} enrolled={enrolled} />
     </main>

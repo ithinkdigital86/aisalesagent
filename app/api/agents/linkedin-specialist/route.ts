@@ -10,6 +10,7 @@ import { z } from 'zod';
 
 import { loadActiveIcp } from '@/lib/cadence/icp';
 import { runAgent, statusForFailure } from '@/lib/cadence/runtime';
+import { checkFit } from '@/lib/cadence/send-controls';
 import { supabaseServer } from '@/lib/supabase/server';
 import type { Json } from '@/types/database';
 
@@ -48,18 +49,25 @@ export async function POST(request: Request) {
     // Ownership (RLS) and lead existence before spending an agent call.
     const { data: ws } = await db
       .from('workspaces')
-      .select('id')
+      .select('id, min_fit_score')
       .eq('id', workspaceId)
       .single();
     if (!ws) return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });
 
     const { data: lead } = await db
       .from('leads')
-      .select('id')
+      .select('id, fit_score')
       .eq('id', leadId)
       .eq('workspace_id', workspaceId)
       .single();
     if (!lead) return NextResponse.json({ error: 'Lead not found' }, { status: 404 });
+
+    // The workspace's minimum fit score, before the model call. Independent
+    // of consent: a lead the gate would pass is still not drafted to here.
+    const fit = checkFit(lead.fit_score, ws.min_fit_score);
+    if (!fit.ok) {
+      return NextResponse.json({ error: `Not drafted: ${fit.message}`, reason: fit.reason }, { status: 409 });
+    }
 
     // Same as the email route: the profile supplies the standing offer, and a
     // workspace without one still gets a draft, just a more generic one.

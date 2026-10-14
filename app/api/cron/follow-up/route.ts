@@ -9,11 +9,17 @@
 // stops — a reply, an unsubscribe, the last step — sequence_stopped_reason is
 // set and the lead comes back here, which is what makes a reply land with the
 // manager that knows how to read one.
+//
+// Leads in a workspace whose kill switch is on are left out entirely and keep
+// their next_action_at, so they are picked up when it is turned off. That
+// includes a reply the manager would have read as an opt-out; the webhook
+// suppresses those on arrival, independently of this cron.
 
 import { NextResponse } from 'next/server';
 import { supabaseService } from '@/lib/supabase/server';
 import { runAgent } from '@/lib/cadence/runtime';
 import { evaluateConsent, type Channel } from '@/lib/cadence/consent';
+import { inList, pausedWorkspaceIds } from '@/lib/cadence/send-controls';
 import { blockPendingActions, writeSuppression } from '@/lib/cadence/suppression';
 
 export const maxDuration = 300;
@@ -25,13 +31,25 @@ export async function GET(request: Request) {
 
   const db = supabaseService();
 
-  const { data: due } = await db
+  let paused: string[];
+  try {
+    paused = await pausedWorkspaceIds(db);
+  } catch (err) {
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'unknown_error' },
+      { status: 500 }
+    );
+  }
+
+  let query = db
     .from('leads')
     .select('id, workspace_id')
     .lte('next_action_at', new Date().toISOString())
     .in('stage', ['contacted', 'engaged'])
     .or('assigned_sequence_id.is.null,sequence_stopped_reason.not.is.null')
     .limit(100);
+  if (paused.length > 0) query = query.not('workspace_id', 'in', inList(paused));
+  const { data: due } = await query;
 
   const handled = [];
   // One failed suppression fails the run, after the other leads are handled.
@@ -108,7 +126,7 @@ export async function GET(request: Request) {
   }
 
   return NextResponse.json(
-    { processed: handled.length, handled },
+    { processed: handled.length, pausedWorkspaces: paused.length, handled },
     { status: suppressionFailed ? 500 : 200 }
   );
 }

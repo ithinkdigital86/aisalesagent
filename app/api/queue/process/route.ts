@@ -6,12 +6,14 @@
 //
 // It makes the same two passes as the cron, in the same order: due sequence
 // steps first, so a step that becomes due now is queued and then delivered on
-// this one request, and the delivery loop second.
+// this one request, and the delivery loop second. A paused workspace is
+// refused before either pass, and the cap defers rather than fails.
 
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { deliverQueuedEmailAction } from '@/lib/cadence/adapters/email';
+import { loadSendControls } from '@/lib/cadence/send-controls';
+import { deliverDueEmails } from '@/lib/cadence/send-queue';
 import { runDueSequenceSteps } from '@/lib/cadence/sequence-runner';
 import { supabaseServer, supabaseService } from '@/lib/supabase/server';
 
@@ -42,34 +44,29 @@ export async function POST(request: Request) {
 
     const service = supabaseService();
 
-    const sequences = await runDueSequenceSteps(service, { workspaceId });
-
-    const { data: due } = await service
-      .from('actions')
-      .select('id, workspace_id, lead_id, subject, body')
-      .eq('workspace_id', workspaceId)
-      .eq('status', 'queued')
-      .eq('channel', 'email')
-      .lte('scheduled_for', new Date().toISOString())
-      .order('scheduled_for', { ascending: true })
-      .limit(50);
-
-    let sent = 0;
-    let blocked = 0;
-    let failed = 0;
-    for (const action of due ?? []) {
-      const result = await deliverQueuedEmailAction(service, action);
-      if (result.status === 'sent') sent += 1;
-      else if (result.status === 'blocked') blocked += 1;
-      else if (result.status === 'failed') failed += 1;
+    // Before anything, including the sequence pass and its model calls.
+    const controls = await loadSendControls(service, workspaceId);
+    if (!controls || controls.paused) {
+      return NextResponse.json(
+        { error: 'Sending is paused for this workspace. Nothing was drafted or sent.' },
+        { status: 409 }
+      );
     }
+
+    const sequences = await runDueSequenceSteps(service, { workspaceId });
+    const delivery = await deliverDueEmails(service, { workspaceId });
+    const held = delivery.held[0] ?? null;
 
     return NextResponse.json({
       data: {
-        processed: due?.length ?? 0,
-        sent,
-        blocked,
-        failed,
+        processed: delivery.processed,
+        sent: delivery.sent,
+        blocked: delivery.blocked,
+        failed: delivery.failed,
+        /** Set when the kill switch or the cap stopped the pass early. */
+        held: held
+          ? { reason: held.reason, retryAt: held.retryAt, waiting: held.waiting }
+          : null,
         sequenceSteps: {
           due: sequences.due,
           queued: sequences.queued,

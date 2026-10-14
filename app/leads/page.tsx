@@ -1,8 +1,10 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
+import { SendingBanner } from '@/components/sending/sending-banner';
 import { loadActiveIcp } from '@/lib/cadence/icp';
 import { parseSteps } from '@/lib/cadence/sequence';
+import { loadSendStatus } from '@/lib/cadence/send-controls';
 import { supabaseServer } from '@/lib/supabase/server';
 import { LeadsTable } from './leads-table';
 
@@ -58,6 +60,7 @@ export default async function LeadsPage({
     .limit(100);
 
   const activeIcp = await loadActiveIcp(db, workspace.id);
+  const sending = await loadSendStatus(db, workspace.id).catch(() => null);
 
   // Only sequences that can actually take a lead are offered for assignment.
   const { data: sequences } = await db
@@ -125,6 +128,8 @@ export default async function LeadsPage({
         </p>
       </div>
 
+      <SendingBanner status={sending} />
+
       {activeIcp ? (
         <div className="rounded-lg border px-4 py-3 text-sm">
           <span className="font-medium text-foreground">Scoring against: </span>
@@ -149,6 +154,7 @@ export default async function LeadsPage({
         workspaceId={workspace.id}
         leads={rows}
         sequences={assignable}
+        minFitScore={sending?.controls.minFitScore ?? null}
         stage={stage}
         sort={sort}
       />

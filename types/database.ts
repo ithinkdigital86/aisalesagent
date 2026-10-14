@@ -844,32 +844,47 @@ export type Database = {
       workspaces: {
         Row: {
           created_at: string;
+          daily_send_cap: number;
           dlt_entity_id: string | null;
           dlt_registered: boolean;
           id: string;
           jurisdictions: string[];
+          min_fit_score: number;
           name: string;
           owner_id: string;
+          sending_paused: boolean;
+          sending_paused_at: string | null;
+          sending_paused_by: string | null;
           updated_at: string;
         };
         Insert: {
           created_at?: string;
+          daily_send_cap?: number;
           dlt_entity_id?: string | null;
           dlt_registered?: boolean;
           id?: string;
           jurisdictions?: string[];
+          min_fit_score?: number;
           name: string;
           owner_id: string;
+          sending_paused?: boolean;
+          sending_paused_at?: string | null;
+          sending_paused_by?: string | null;
           updated_at?: string;
         };
         Update: {
           created_at?: string;
+          daily_send_cap?: number;
           dlt_entity_id?: string | null;
           dlt_registered?: boolean;
           id?: string;
           jurisdictions?: string[];
+          min_fit_score?: number;
           name?: string;
           owner_id?: string;
+          sending_paused?: boolean;
+          sending_paused_at?: string | null;
+          sending_paused_by?: string | null;
           updated_at?: string;
         };
         Relationships: [
@@ -887,6 +902,10 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      claim_email_send: {
+        Args: { p_action_id: string };
+        Returns: string;
+      };
       owns_workspace: {
         Args: { ws: string };
         Returns: boolean;

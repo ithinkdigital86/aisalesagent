@@ -15,6 +15,10 @@
 //  - every statement runs whole when awaited, so an update filtered on the
 //    old status behaves like the single UPDATE it stands for: of two callers,
 //    only the first finds the row still matching.
+//
+//  - rpc('claim_email_send') is the function from migration 0011, written
+//    out again here, and runs whole in the same way, which is what the lock
+//    on the workspace row buys the real one.
 
 import type { SupabaseClient } from '@supabase/supabase-js';
 
@@ -56,6 +60,45 @@ export class FakeDb {
   from(table: string) {
     return new FakeQuery(this, table);
   }
+
+  /** The clock claim_email_send reads. Tests move it to age a window. */
+  now: () => Date = () => new Date();
+
+  rpc(name: string, args: Record<string, unknown>): PromiseLike<{ data: unknown; error: FakeError | null }> {
+    const call = () => {
+      if (name !== 'claim_email_send') {
+        return { data: null, error: { code: 'PGRST202', message: `no function ${name}` } };
+      }
+      return { data: this.claimEmailSend(args.p_action_id as string), error: null };
+    };
+    return { then: (onfulfilled, onrejected) => Promise.resolve().then(call).then(onfulfilled, onrejected) };
+  }
+
+  /** migration 0011's claim_email_send. Defaults are the column defaults. */
+  private claimEmailSend(actionId: string): string {
+    const action = this.rows('actions').find((row) => row.id === actionId);
+    if (!action) return 'not_found';
+    if (action.status !== 'queued' || action.channel !== 'email') return 'already_claimed';
+
+    const workspace = this.rows('workspaces').find((row) => row.id === action.workspace_id);
+    if (workspace?.sending_paused === true) return 'sending_paused';
+    const cap = (workspace?.daily_send_cap as number | undefined) ?? 50;
+
+    const now = this.now();
+    const since = now.getTime() - 24 * 3_600_000;
+    const at = (value: unknown) => (typeof value === 'string' ? new Date(value).getTime() : NaN);
+    const used = this.rows('actions').filter(
+      (row) =>
+        row.workspace_id === action.workspace_id &&
+        row.channel === 'email' &&
+        (at(row.sent_at) >= since || (row.status === 'sending' && at(row.updated_at) >= since))
+    ).length;
+    if (used >= cap) return 'daily_cap_reached';
+
+    action.status = 'sending';
+    action.updated_at = now.toISOString();
+    return 'claimed';
+  }
 }
 
 /** Hand the fake to code typed against the real client. */
@@ -75,6 +118,13 @@ function sameColumns(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((column) => b.includes(column));
 }
 
+/** NaN for a null, so a null passes no comparison, as in SQL. */
+function compare(left: unknown, right: string | number): number {
+  if (left === null || left === undefined) return Number.NaN;
+  if (typeof right === 'number') return Number(left) - right;
+  return new Date(String(left)).getTime() - new Date(right).getTime();
+}
+
 /** Two rows collide on an index when both are covered and no key is null. */
 function collides(index: UniqueIndex, a: Row, b: Row): boolean {
   if (!predicateHolds(index.where, a) || !predicateHolds(index.where, b)) return false;
@@ -92,7 +142,11 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
   private filters: Filter[] = [];
   private returning = false;
   private singleRow = false;
+  private maybe = false;
+  private counting = false;
+  private headOnly = false;
   private rowLimit: number | null = null;
+  private ordering: Array<{ column: string; ascending: boolean }> = [];
   // Plain fields rather than constructor parameter properties: Node runs this
   // under type-stripping, which does not rewrite them.
   private db: FakeDb;
@@ -104,8 +158,10 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
   }
 
   /** Every column comes back; nothing under test reads one it did not ask for. */
-  select() {
+  select(_columns?: string, options: { count?: 'exact'; head?: boolean } = {}) {
     this.returning = true;
+    this.counting = options.count === 'exact';
+    this.headOnly = options.head === true;
     return this;
   }
 
@@ -138,6 +194,33 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
     return this;
   }
 
+  /** Comparisons on ISO timestamps and numbers, the only ones used here. */
+  gte(column: string, value: string | number) {
+    this.filters.push((row) => compare(row[column], value) >= 0);
+    return this;
+  }
+
+  lte(column: string, value: string | number) {
+    this.filters.push((row) => compare(row[column], value) <= 0);
+    return this;
+  }
+
+  lt(column: string, value: string | number) {
+    this.filters.push((row) => compare(row[column], value) < 0);
+    return this;
+  }
+
+  /** `not(col, 'is', null)` and `not(col, 'in', '(a,b)')`. */
+  not(column: string, operator: 'is' | 'in', value: null | string) {
+    if (operator === 'is') {
+      this.filters.push((row) => (row[column] ?? null) !== value);
+    } else {
+      const values = String(value).replace(/^\(|\)$/g, '').split(',');
+      this.filters.push((row) => !values.includes(String(row[column])));
+    }
+    return this;
+  }
+
   in(column: string, values: unknown[]) {
     this.filters.push((row) => values.includes(row[column]));
     return this;
@@ -154,7 +237,8 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
     return this;
   }
 
-  order() {
+  order(column: string, options: { ascending?: boolean } = {}) {
+    this.ordering.push({ column, ascending: options.ascending ?? true });
     return this;
   }
 
@@ -165,6 +249,12 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
 
   single() {
     this.singleRow = true;
+    return this;
+  }
+
+  maybeSingle() {
+    this.singleRow = true;
+    this.maybe = true;
     return this;
   }
 
@@ -181,14 +271,30 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
     return Promise.resolve(result).then(onfulfilled, onrejected);
   }
 
+  /** Nulls last either way, which is PostgREST's default for ascending. */
   private matching(): Row[] {
-    return this.db.rows(this.table).filter((row) => this.filters.every((f) => f(row)));
+    const rows = this.db.rows(this.table).filter((row) => this.filters.every((f) => f(row)));
+    if (this.ordering.length === 0) return rows;
+    return [...rows].sort((a, b) => {
+      for (const { column, ascending } of this.ordering) {
+        const left = a[column] ?? null;
+        const right = b[column] ?? null;
+        if (left === right) continue;
+        if (left === null) return 1;
+        if (right === null) return -1;
+        const sign = (left as string | number) < (right as string | number) ? -1 : 1;
+        return ascending ? sign : -sign;
+      }
+      return 0;
+    });
   }
 
-  private shape(rows: Row[]): { data: unknown; error: FakeError | null } {
+  private shape(rows: Row[]): { data: unknown; error: FakeError | null; count?: number } {
+    if (this.counting && this.headOnly) return { data: null, error: null, count: rows.length };
     const limited = this.rowLimit === null ? rows : rows.slice(0, this.rowLimit);
     const copies = limited.map((row) => ({ ...row }));
     if (!this.singleRow) return { data: copies, error: null };
+    if (this.maybe && copies.length === 0) return { data: null, error: null };
     if (copies.length !== 1) {
       return { data: null, error: { code: 'PGRST116', message: `${copies.length} rows for single()` } };
     }

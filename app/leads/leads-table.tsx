@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 
 import { enrolLeads } from '@/app/actions/sequences';
 import { Button } from '@/components/ui/button';
+import { checkFit } from '@/lib/cadence/send-controls';
 import { describeStop, formatDueDate } from '@/lib/cadence/sequence';
 import { LeadThread } from './lead-thread';
 
@@ -76,12 +77,15 @@ export function LeadsTable({
   workspaceId,
   leads,
   sequences,
+  minFitScore,
   stage,
   sort,
 }: {
   workspaceId: string;
   leads: Lead[];
   sequences: AssignableSequence[];
+  /** The workspace's minimum, or null when it could not be read. */
+  minFitScore: number | null;
   stage: string;
   sort: 'fit_asc' | 'fit_desc';
 }) {
@@ -476,7 +480,9 @@ export function LeadsTable({
                       {lead.stage}
                     </span>
                   </td>
-                  <td className="px-3 py-2 font-mono">{lead.fit_score ?? '-'}</td>
+                  <td className="px-3 py-2 font-mono">
+                    <FitScore score={lead.fit_score} minFitScore={minFitScore} />
+                  </td>
                   <td className="px-3 py-2">
                     {lead.sequence_name ? (
                       <div className="max-w-[12rem]">
@@ -535,5 +541,19 @@ export function LeadsTable({
         />
       ) : null}
     </div>
+  );
+}
+
+/** The score, struck through when the workspace's minimum keeps it out. */
+function FitScore({ score, minFitScore }: { score: number | null; minFitScore: number | null }) {
+  const fit = minFitScore === null ? null : checkFit(score, minFitScore);
+  if (!fit || fit.ok) return <>{score ?? '-'}</>;
+  return (
+    <span
+      className="text-muted-foreground line-through decoration-destructive/60"
+      title={`Not drafted to or put on a sequence: ${fit.message}`}
+    >
+      {score ?? '-'}
+    </span>
   );
 }

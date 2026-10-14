@@ -435,3 +435,76 @@ The webhook and follow-up cron paths were not exercised live
 the unit tests cover them. The cron route was avoided for the send test
 because it delivers every workspace's queue. The throwaway user and workspace
 were deleted afterwards and nothing was left behind.
+
+### 2026-10-14 Automation safety: kill switch, daily send cap, minimum fit score
+
+**Problem.** Sequences now run from the cron with nobody watching, and
+nothing limited what an unattended pass could do: no way to stop all sending
+at once, no ceiling on volume from a new sending domain, and any lead could
+be drafted to or enrolled whatever its score, including leads never scored.
+
+**Change.** Migration 0011 adds three workspace columns and one function.
+
+- `sending_paused` (+ `sending_paused_at`, `sending_paused_by`), the kill
+  switch. `daily_send_cap` (default 50), emails in a rolling 24 hours.
+  `min_fit_score` (default 60, the qualifier's "this month" band).
+- `claim_email_send(action_id)` replaces the bare update the adapter claimed
+  rows with (0010). It locks the workspace row, refuses while paused, counts
+  the window (`sent_at` in the last 24 hours, plus rows in `sending` claimed
+  in it), refuses at the cap, and only then moves the row `queued` to
+  `sending`. A refused row is left queued; nothing is failed or discarded.
+  Execute is granted to the service role only.
+- `adapters/email.ts`: both send paths claim through the function and return
+  a new `deferred` result for the switch and the cap. `sendEmail` now inserts
+  its row as `queued` and claims it, so a direct send obeys the limits too.
+- `lib/cadence/send-queue.ts`: the delivery loop the cron and the dashboard
+  button used to copy. Goes workspace by workspace, skipping paused and full
+  ones, so one workspace's held rows cannot fill every batch.
+- Sequence runner: reads the switch fresh for every lead (a pass with model
+  calls runs for minutes), leaves paused workspaces out of its query, defers
+  leads below the minimum by a day keeping their step, and keeps a per-pass
+  email budget so it does not draft more email than the cap lets out today.
+- Kill switch checks in the send-queue and follow-up crons, which draft or
+  send, and in `/api/queue/process` (409 before any model call). The
+  follow-up cron skips paused workspaces; suppression on unsubscribe, bounce
+  and complaint still happens in the webhook and unsubscribe route, which do
+  not check it. The sales-manager cron deliberately ignores the switch: it
+  sends nothing, and its review is most useful while sending is paused.
+- Minimum fit score in the email and LinkedIn draft routes (409, before the
+  model call), in `enrolLeads` (named in the skipped list), and in the runner.
+  `checkFit()` refuses an unscored lead at any minimum, including 0.
+- Dashboard panel: the switch, sends in the last 24 hours against the cap,
+  rows stuck in `sending` over an hour, and the two limits. A banner on the
+  leads, approvals and sequences pages shows the state. Leads below the
+  minimum have their score struck through.
+
+**Decisions worth knowing.** A lead below the minimum is deferred, not
+stopped: stopping would force a re-enrol, and re-enrolling restarts at step
+one. Rows in `sending` count against the cap until they are 24 hours old,
+because whether they went out is unknown. Approving a draft is not gated by
+the switch; an approved email only queues, and the claim holds it. The
+display zone is still the fixed `Asia/Kolkata` from `formatDueDate`.
+
+**Deploy order.** 0011 is applied. Deploying this code without it would fail
+every claim and send nothing (rows stay queued). The reverse is safe.
+
+**Tests.** 16 new in `send-controls.test.ts`. The fake PostgREST gained
+`rpc('claim_email_send')` (a copy of the SQL), ordering, range filters and
+head counts. With the adapter change reverted, the six tests that depend on
+the claim fail.
+
+**Verification.** `tsc`, `npm test` (219 passing), `npm run build`. Live,
+through the dev server, against a throwaway user and workspace with the lead
+at `delivered@resend.dev`: 20 scripted checks, all passed. Paused: the
+queue route answered 409, the claim answered `sending_paused`, the row stayed
+queued and went on resume. Cap 3 with one sent: two went, two were held with
+a retry time, a second pass sent nothing, and three concurrent passes with
+one free slot sent exactly one. Fit: drafts refused for unscored and 40-of-60
+leads with no `agent_runs` row written; leads put on a sequence directly were
+deferred a day at step 0 with no draft. A signed-in user calling the claim
+function got 42501. In the browser (on `qa.localhost`, to keep the owner's
+`localhost` session apart): the panel, the switch through its server action,
+the banners on all three pages, enrolment naming both refused leads, the
+stuck-row count, no console errors. Not exercised live: the cron routes,
+since they run across every workspace. The throwaway user and workspace were
+deleted afterwards and nothing was left behind.

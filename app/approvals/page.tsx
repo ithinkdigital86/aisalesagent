@@ -1,6 +1,8 @@
 import Link from 'next/link';
 import { redirect } from 'next/navigation';
 
+import { SendingBanner } from '@/components/sending/sending-banner';
+import { loadSendStatus } from '@/lib/cadence/send-controls';
 import { supabaseServer } from '@/lib/supabase/server';
 import { ApprovalsList } from './approvals-list';
 
@@ -27,6 +29,8 @@ export default async function ApprovalsPage() {
     .order('created_at', { ascending: true })
     .limit(100);
 
+  const sending = await loadSendStatus(db, workspace.id).catch(() => null);
+
   return (
     <main className="mx-auto flex min-h-svh max-w-3xl flex-col gap-8 px-6 py-16">
       <header className="flex items-center justify-between">
@@ -48,6 +52,8 @@ export default async function ApprovalsPage() {
           reject. LinkedIn, Instagram, and voice always land here.
         </p>
       </div>
+
+      <SendingBanner status={sending} />
 
       <ApprovalsList actions={(actions ?? []) as never} />
     </main>

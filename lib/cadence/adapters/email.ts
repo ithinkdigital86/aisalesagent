@@ -31,7 +31,44 @@ export type SendEmailResult =
   | { status: 'blocked'; actionId: string | null; reason: string }
   | { status: 'failed'; actionId: string | null; error: string }
   /** Another pass claimed the row first, so this one sent nothing. */
-  | { status: 'skipped'; actionId: string; reason: 'already_claimed' };
+  | { status: 'skipped'; actionId: string; reason: 'already_claimed' }
+  /**
+   * The workspace's kill switch is on or its daily cap is full. The row is
+   * left queued, untouched, and a later pass sends it.
+   */
+  | { status: 'deferred'; actionId: string; reason: DeferReason };
+
+/** Why claim_email_send (migration 0011) left a row queued. */
+export type DeferReason = 'sending_paused' | 'daily_cap_reached';
+
+type Claim =
+  | { claimed: true }
+  | { claimed: false; result: SendEmailResult };
+
+/**
+ * Claim a queued email row for sending. One call to claim_email_send, which
+ * checks the kill switch and the daily cap and moves the row from 'queued' to
+ * 'sending' in one locked step, so neither limit can be raced past and two
+ * passes cannot both take the row. Anything but 'claimed' means send nothing.
+ */
+async function claimForSending(db: SupabaseClient, actionId: string): Promise<Claim> {
+  const { data, error } = await db.rpc('claim_email_send', { p_action_id: actionId });
+  if (error) {
+    return {
+      claimed: false,
+      result: { status: 'failed', actionId, error: `claim_failed: ${error.message}` },
+    };
+  }
+  switch (data as string) {
+    case 'claimed':
+      return { claimed: true };
+    case 'sending_paused':
+    case 'daily_cap_reached':
+      return { claimed: false, result: { status: 'deferred', actionId, reason: data as DeferReason } };
+    default:
+      return { claimed: false, result: { status: 'skipped', actionId, reason: 'already_claimed' } };
+  }
+}
 
 /** Shape of a queued email action the send queue hands to the adapter. */
 export interface QueuedEmailAction {
@@ -207,12 +244,19 @@ export async function sendEmail(
   const bodyWithUnsub = withUnsubscribe(input.body, url);
 
   // 3. Record the actions row with the returned consent_basis BEFORE sending.
-  // A row about to be sent here is written as 'sending', already claimed, so
-  // the send queue never picks it up as 'queued' while this call is sending.
-  const status: Enums<'action_status'> = verdict.requiresApproval ? 'awaiting_approval' : 'sending';
+  // A row about to be sent here is written as 'queued' and claimed below the
+  // same way the send queue claims one, so the kill switch and the daily cap
+  // hold for a direct send too. A deferred row stays queued for the queue.
+  const status: Enums<'action_status'> = verdict.requiresApproval ? 'awaiting_approval' : 'queued';
   const { data: action } = await db
     .from('actions')
-    .insert({ ...base, body: bodyWithUnsub, status, consent_basis: verdict.basis })
+    .insert({
+      ...base,
+      body: bodyWithUnsub,
+      status,
+      consent_basis: verdict.basis,
+      scheduled_for: new Date().toISOString(),
+    })
     .select('id')
     .single();
   const actionId = (action?.id as string) ?? null;
@@ -226,6 +270,9 @@ export async function sendEmail(
   if (!actionId) {
     return { status: 'failed', actionId: null, error: 'action_insert_failed' };
   }
+
+  const claim = await claimForSending(db, actionId);
+  if (!claim.claimed) return claim.result;
 
   // 5. Send.
   try {
@@ -269,27 +316,19 @@ export async function sendEmail(
  * route). Re-runs the consent gate at send time, records the basis, sends, and
  * updates the existing row. Used by the send-queue cron and its manual trigger.
  *
- * The row is claimed first: moved from 'queued' to 'sending' by an update
- * that only matches while it is still 'queued'. The cron and the dashboard
- * button select the same queued rows, and without the claim two overlapping
- * passes both sent each one. Whichever pass loses the claim sends nothing.
+ * The row is claimed first: moved from 'queued' to 'sending' by
+ * claim_email_send, which only matches while it is still 'queued'. The cron
+ * and the dashboard button select the same queued rows, and without the claim
+ * two overlapping passes both sent each one. Whichever pass loses the claim
+ * sends nothing. The same call refuses the claim, leaving the row queued,
+ * while the workspace is paused or its daily cap is full.
  */
 export async function deliverQueuedEmailAction(
   db: SupabaseClient,
   action: QueuedEmailAction
 ): Promise<SendEmailResult> {
-  const { data: claimed, error: claimError } = await db
-    .from('actions')
-    .update({ status: 'sending' })
-    .eq('id', action.id)
-    .eq('status', 'queued')
-    .select('id');
-  if (claimError) {
-    return { status: 'failed', actionId: action.id, error: `claim_failed: ${claimError.message}` };
-  }
-  if (!claimed?.length) {
-    return { status: 'skipped', actionId: action.id, reason: 'already_claimed' };
-  }
+  const claim = await claimForSending(db, action.id);
+  if (!claim.claimed) return claim.result;
 
   const verdict = await evaluateConsent(db, {
     workspaceId: action.workspace_id,

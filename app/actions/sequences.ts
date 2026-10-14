@@ -21,6 +21,7 @@ import {
   parseSteps,
   stepsSchema,
 } from '@/lib/cadence/sequence';
+import { checkFit, loadSendControls } from '@/lib/cadence/send-controls';
 import { supabaseServer } from '@/lib/supabase/server';
 import type { Json } from '@/types/database';
 
@@ -170,7 +171,8 @@ const enrolSchema = z.object({
  * because "enrolled, then stopped a minute later" reads as a bug to whoever
  * did it. Suppression is not checked here: the consent gate owns that answer
  * and gives it at send time, every time, which is the only place it can be
- * relied on.
+ * relied on. Leads below the workspace's minimum fit score, or unscored, are
+ * refused too; the runner checks again at every step.
  */
 export async function enrolLeads(input: {
   workspaceId: string;
@@ -206,9 +208,14 @@ export async function enrolLeads(input: {
 
     const { data: leads } = await db
       .from('leads')
-      .select('id, stage')
+      .select('id, stage, fit_score')
       .eq('workspace_id', workspaceId)
       .in('id', leadIds);
+
+    // The minimum fit score is a rule about who is worth a sequence at all,
+    // so it is applied here as well as at each step.
+    const controls = await loadSendControls(db, workspaceId);
+    if (!controls) return { ok: false, error: 'Could not read the workspace settings' };
 
     const skipped: Array<{ leadId: string; reason: string }> = [];
     const eligible: string[] = [];
@@ -218,10 +225,13 @@ export async function enrolLeads(input: {
       if (!found.has(leadId)) skipped.push({ leadId, reason: 'not in this workspace' });
     }
     for (const lead of leads ?? []) {
+      const fit = checkFit(lead.fit_score, controls.minFitScore);
       if (lead.stage === 'suppressed') {
         skipped.push({ leadId: lead.id, reason: 'suppressed' });
       } else if ((TERMINAL_STAGES as readonly string[]).includes(lead.stage)) {
         skipped.push({ leadId: lead.id, reason: lead.stage.replace('_', ' ') });
+      } else if (!fit.ok) {
+        skipped.push({ leadId: lead.id, reason: fit.message });
       } else {
         eligible.push(lead.id);
       }

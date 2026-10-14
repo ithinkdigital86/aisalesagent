@@ -5,6 +5,11 @@
 // logs each output to agent_runs, which is what the dashboard card reads, so
 // the daily review is waiting on the dashboard without anyone pressing a
 // button.
+//
+// It runs whether or not a workspace's kill switch is on. It reads the
+// pipeline and writes a review, sends nothing, and a review is most useful
+// while sending is paused. The send-queue and follow-up crons, which draft or
+// send, are the ones that check the switch.
 
 import { NextResponse } from 'next/server';
 

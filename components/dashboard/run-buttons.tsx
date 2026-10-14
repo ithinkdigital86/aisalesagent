@@ -5,8 +5,21 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 
 import { Button } from '@/components/ui/button';
+import { formatSendTime } from '@/lib/cadence/send-controls';
 
-export function RunButtons({ workspaceId }: { workspaceId: string }) {
+type Held = { reason: 'sending_paused' | 'daily_cap_reached'; retryAt: string | null; waiting: number };
+
+/** What the cap or the switch held back, for the end of the toast. */
+function describeHeld(held: Held | null): string {
+  if (!held) return '';
+  if (held.reason === 'sending_paused') return ' Sending was paused during the run.';
+  const when = held.retryAt ? ` until ${formatSendTime(held.retryAt)}` : '';
+  return ` Daily cap reached: ${held.waiting} queued email${held.waiting === 1 ? '' : 's'} wait${
+    held.waiting === 1 ? 's' : ''
+  }${when}.`;
+}
+
+export function RunButtons({ workspaceId, paused }: { workspaceId: string; paused: boolean }) {
   const router = useRouter();
   const [pending, setPending] = React.useState<null | 'queue' | 'manager'>(null);
 
@@ -24,7 +37,9 @@ export function RunButtons({ workspaceId }: { workspaceId: string }) {
       }
       if (kind === 'queue') {
         const d = payload.data;
-        toast.success(`Queue: ${d.sent} sent, ${d.blocked} blocked, ${d.failed} failed.`);
+        const summary = `Queue: ${d.sent} sent, ${d.blocked} blocked, ${d.failed} failed.${describeHeld(d.held)}`;
+        if (d.held) toast.warning(summary);
+        else toast.success(summary);
       } else {
         toast.success('Sales Manager ran.');
       }
@@ -41,10 +56,11 @@ export function RunButtons({ workspaceId }: { workspaceId: string }) {
       <Button
         size="sm"
         variant="outline"
-        disabled={pending !== null}
+        disabled={pending !== null || paused}
+        title={paused ? 'Sending is paused. Resume it below first.' : undefined}
         onClick={() => post('/api/queue/process', 'queue')}
       >
-        {pending === 'queue' ? 'Processing' : 'Process send queue'}
+        {pending === 'queue' ? 'Processing' : paused ? 'Sending paused' : 'Process send queue'}
       </Button>
       <Button
         size="sm"

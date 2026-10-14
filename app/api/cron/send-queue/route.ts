@@ -8,10 +8,13 @@
 //
 //  2. Delivery. Queued email actions whose scheduled_for has passed: the
 //     consent gate is re-run on each, then it sends, then the row is updated.
+//
+// Both passes skip a workspace whose kill switch is on, and delivery stops a
+// workspace at its daily cap; see lib/cadence/send-controls.ts.
 
 import { NextResponse } from 'next/server';
 
-import { deliverQueuedEmailAction } from '@/lib/cadence/adapters/email';
+import { deliverDueEmails } from '@/lib/cadence/send-queue';
 import { runDueSequenceSteps } from '@/lib/cadence/sequence-runner';
 import { supabaseService } from '@/lib/supabase/server';
 
@@ -24,22 +27,16 @@ export async function GET(request: Request) {
 
   const db = supabaseService();
 
-  const sequences = await runDueSequenceSteps(db);
-
-  const { data: due } = await db
-    .from('actions')
-    .select('id, workspace_id, lead_id, subject, body')
-    .eq('status', 'queued')
-    .eq('channel', 'email')
-    .lte('scheduled_for', new Date().toISOString())
-    .order('scheduled_for', { ascending: true })
-    .limit(50);
-
-  const handled = [];
-  for (const action of due ?? []) {
-    const result = await deliverQueuedEmailAction(db, action);
-    handled.push({ id: action.id, status: result.status });
+  try {
+    const sequences = await runDueSequenceSteps(db);
+    const delivery = await deliverDueEmails(db);
+    return NextResponse.json({ sequences, ...delivery });
+  } catch (err) {
+    // A read the limits depend on failed. Nothing more was sent; the next
+    // tick tries again.
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : 'unknown_error' },
+      { status: 500 }
+    );
   }
-
-  return NextResponse.json({ sequences, processed: handled.length, handled });
 }
