@@ -35,6 +35,7 @@ export type Database = {
           replied_at: string | null;
           reply_body: string | null;
           reply_sentiment: string | null;
+          retry_of: string | null;
           scheduled_for: string | null;
           sent_at: string | null;
           sequence_id: string | null;
@@ -60,6 +61,7 @@ export type Database = {
           replied_at?: string | null;
           reply_body?: string | null;
           reply_sentiment?: string | null;
+          retry_of?: string | null;
           scheduled_for?: string | null;
           sent_at?: string | null;
           sequence_id?: string | null;
@@ -85,6 +87,7 @@ export type Database = {
           replied_at?: string | null;
           reply_body?: string | null;
           reply_sentiment?: string | null;
+          retry_of?: string | null;
           scheduled_for?: string | null;
           sent_at?: string | null;
           sequence_id?: string | null;
@@ -100,6 +103,13 @@ export type Database = {
             columns: ['lead_id'];
             isOneToOne: false;
             referencedRelation: 'leads';
+            referencedColumns: ['id'];
+          },
+          {
+            foreignKeyName: 'actions_retry_of_fkey';
+            columns: ['retry_of'];
+            isOneToOne: false;
+            referencedRelation: 'actions';
             referencedColumns: ['id'];
           },
           {

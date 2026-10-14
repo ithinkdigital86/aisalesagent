@@ -8,7 +8,7 @@ import { toast } from 'sonner';
 import { enrolLeads } from '@/app/actions/sequences';
 import { Button } from '@/components/ui/button';
 import { checkFit } from '@/lib/cadence/send-controls';
-import { describeStop, formatDueDate } from '@/lib/cadence/sequence';
+import { describeStop, formatDueDate, type SequenceProgress } from '@/lib/cadence/sequence';
 import { LeadThread } from './lead-thread';
 
 type Lead = {
@@ -33,7 +33,8 @@ type Lead = {
   sequence_step: number;
   /** Why the run ended, null while it is still running. */
   sequence_stopped_reason: string | null;
-  next_action_at: string | null;
+  /** Held on a step that has not sent, or the date the next step is due. */
+  sequence_progress: SequenceProgress;
 };
 
 /** An active sequence with at least one step, so it can take a lead. */
@@ -493,7 +494,9 @@ export function LeadsTable({
                           step {lead.sequence_step} of {lead.sequence_steps} ·{' '}
                           {lead.sequence_stopped_reason
                             ? describeStop(lead.sequence_stopped_reason)
-                            : `next ${formatDueDate(lead.next_action_at)}`}
+                            : 'text' in lead.sequence_progress
+                              ? lead.sequence_progress.text
+                              : `next ${formatDueDate(lead.sequence_progress.due)}`}
                         </div>
                       </div>
                     ) : (

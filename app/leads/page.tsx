@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { SendingBanner } from '@/components/sending/sending-banner';
 import { loadActiveIcp } from '@/lib/cadence/icp';
 import { parseSteps } from '@/lib/cadence/sequence';
+import { loadCurrentStepAttempts, progressFor } from '@/lib/cadence/sequence-progress';
 import { loadSendStatus } from '@/lib/cadence/send-controls';
 import { supabaseServer } from '@/lib/supabase/server';
 import { LeadsTable } from './leads-table';
@@ -60,6 +61,7 @@ export default async function LeadsPage({
     .limit(100);
 
   const activeIcp = await loadActiveIcp(db, workspace.id);
+  const attempts = await loadCurrentStepAttempts(db, leads ?? []);
   const sending = await loadSendStatus(db, workspace.id).catch(() => null);
 
   // Only sequences that can actually take a lead are offered for assignment.
@@ -84,6 +86,7 @@ export default async function LeadsPage({
   const rows = (leads ?? []).map((lead) => {
     const joined = Array.isArray(lead.icp) ? lead.icp[0] : lead.icp;
     const sequence = Array.isArray(lead.sequence) ? lead.sequence[0] : lead.sequence;
+    const steps = sequence ? parseSteps(sequence.steps) : [];
     return {
       id: lead.id,
       full_name: lead.full_name,
@@ -98,10 +101,10 @@ export default async function LeadsPage({
       icp_stale: joined ? joined.active !== true : false,
       sequence_id: lead.assigned_sequence_id,
       sequence_name: sequence?.name ?? null,
-      sequence_steps: sequence ? parseSteps(sequence.steps).length : 0,
+      sequence_steps: steps.length,
       sequence_step: lead.sequence_step,
       sequence_stopped_reason: lead.sequence_stopped_reason,
-      next_action_at: lead.next_action_at,
+      sequence_progress: progressFor(lead, steps, attempts),
     };
   });
 

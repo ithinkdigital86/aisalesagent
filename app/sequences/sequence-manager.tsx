@@ -21,6 +21,7 @@ import {
   MAX_STEPS,
   describeStop,
   formatDueDate,
+  type SequenceProgress,
   type SequenceStep,
 } from '@/lib/cadence/sequence';
 
@@ -42,7 +43,8 @@ export interface EnrolledLead {
   sequenceId: string;
   step: number;
   stoppedReason: string | null;
-  nextActionAt: string | null;
+  /** Held on a step that has not sent, or the date the next step is due. */
+  progress: SequenceProgress;
 }
 
 /** A sensible second touch: three days later, on the same channel. */
@@ -246,7 +248,11 @@ function EnrolledTable({ leads, stepCount }: { leads: EnrolledLead[]; stepCount:
                 {lead.stoppedReason ? (
                   <span className="text-xs">{describeStop(lead.stoppedReason)}</span>
                 ) : (
-                  formatDueDate(lead.nextActionAt, { year: true })
+                  'text' in lead.progress ? (
+                    <span className="text-xs">{lead.progress.text}</span>
+                  ) : (
+                    formatDueDate(lead.progress.due, { year: true })
+                  )
                 )}
               </td>
             </tr>
@@ -356,7 +362,7 @@ function SequenceEditor({
               </label>
 
               <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                {index === 0 ? 'Days before sending' : 'Days after the step above'}
+                {index === 0 ? 'Days before sending' : 'Days after the step above is sent'}
                 <Input
                   type="number"
                   min={0}

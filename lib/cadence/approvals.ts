@@ -41,3 +41,38 @@ export async function approvalPatch(
 
   return { status: 'sent', sent_at: now, consent_basis: verdict.basis };
 }
+
+export interface SequenceDraft {
+  workspace_id: string;
+  lead_id: string;
+  sequence_id: string | null;
+  step_number: number | null;
+}
+
+/**
+ * Bring a sequence lead's next look forward to now, after its step's draft
+ * was approved or rejected. While a draft waits, the runner only looks again
+ * on the day it would expire, so without this an approval would hold the next
+ * step until then, and a rejection would not show as a stopped run until
+ * then either. Only for a lead still running that same step: a lead moved on,
+ * stopped or re-enrolled is left alone.
+ *
+ * Returns the database error rather than throwing. The approval itself has
+ * already been written, and the expiry date is still there as a fallback.
+ */
+export async function wakeSequenceLead(
+  db: SupabaseClient,
+  action: SequenceDraft,
+  now: string = new Date().toISOString()
+): Promise<{ message: string } | null> {
+  if (!action.sequence_id || !action.step_number) return null;
+  const { error } = await db
+    .from('leads')
+    .update({ next_action_at: now })
+    .eq('id', action.lead_id)
+    .eq('workspace_id', action.workspace_id)
+    .eq('assigned_sequence_id', action.sequence_id)
+    .eq('sequence_step', action.step_number)
+    .is('sequence_stopped_reason', null);
+  return error ? { message: error.message } : null;
+}

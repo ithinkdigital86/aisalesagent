@@ -32,6 +32,15 @@ export function cronDb(): FakeDb {
     sequences: [],
     icp_profiles: [],
   });
+  // The nullable columns the runner and the stop check read, which an
+  // insert leaves null rather than absent.
+  db.defaults.actions = {
+    sent_at: null,
+    replied_at: null,
+    block_reason: null,
+    provider_message_id: null,
+    retry_of: null,
+  };
   // The arbiters writeSuppression names (migration 0009).
   db.indexes.suppression_list = [
     { name: 'suppression_list_workspace_email_key', columns: ['workspace_id', 'email'], where: null },
@@ -94,17 +103,82 @@ export function addLead(db: FakeDb, workspaceId: string, id: string, spec: LeadS
   });
 }
 
-/** A one-step email sequence that queues without approval. */
-export function addSequence(db: FakeDb, workspaceId: string, id: string): void {
+export interface StepSpec {
+  channel?: string;
+  delay_days?: number;
+  requires_approval?: boolean;
+}
+
+/**
+ * An email sequence that queues without approval: one step by default, or
+ * the steps given, numbered in order.
+ */
+export function addSequence(
+  db: FakeDb,
+  workspaceId: string,
+  id: string,
+  steps: StepSpec[] = [{ delay_days: 0 }]
+): void {
   db.rows('sequences').push({
     id,
     workspace_id: workspaceId,
     name: 'Intro',
-    steps: [{ channel: 'email', delay_days: 0, requires_approval: false }],
+    steps: steps.map((step, index) => ({
+      step: index + 1,
+      channel: step.channel ?? 'email',
+      delay_days: step.delay_days ?? 0,
+      requires_approval: step.requires_approval ?? false,
+    })),
     active: true,
     sent_count: 0,
     reply_count: 0,
   });
+}
+
+export interface StepActionSpec {
+  status: string;
+  /** How long ago the row was written, in hours. */
+  createdHoursAgo?: number;
+  /** How long ago it was sent, in hours; only for a sent row. */
+  sentHoursAgo?: number;
+  blockReason?: string | null;
+  body?: string;
+  /** The action this one retries. */
+  retryOf?: string | null;
+}
+
+/** An action a sequence step already wrote for a lead. Returns its id. */
+export function addStepAction(
+  db: FakeDb,
+  workspaceId: string,
+  leadId: string,
+  sequenceId: string,
+  step: number,
+  spec: StepActionSpec
+): string {
+  const id = db.id();
+  const created = hoursFromNow(-(spec.createdHoursAgo ?? 1));
+  db.rows('actions').push({
+    id,
+    workspace_id: workspaceId,
+    lead_id: leadId,
+    agent: 'email_specialist',
+    channel: 'email',
+    status: spec.status,
+    subject: `Step ${step}`,
+    body: spec.body ?? `Step ${step} body`,
+    ai_tells: null,
+    block_reason: spec.blockReason ?? null,
+    scheduled_for: created,
+    created_at: created,
+    updated_at: spec.sentHoursAgo !== undefined ? hoursFromNow(-spec.sentHoursAgo) : created,
+    sent_at: spec.sentHoursAgo !== undefined ? hoursFromNow(-spec.sentHoursAgo) : null,
+    replied_at: null,
+    retry_of: spec.retryOf ?? null,
+    sequence_id: sequenceId,
+    step_number: step,
+  });
+  return id;
 }
 
 /** Queued email actions for a lead, all due, oldest first. */

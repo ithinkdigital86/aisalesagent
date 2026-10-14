@@ -56,6 +56,8 @@ export class FakeDb {
   indexes: Record<string, UniqueIndex[]> = {};
   /** Checked before every statement, for testing what callers do with an error. */
   faults: Fault[] = [];
+  /** Column defaults an insert fills in, by table, as the real columns have. */
+  defaults: Record<string, Row> = {};
   private nextId = 1;
 
   constructor(tables: Record<string, Row[]> = {}) {
@@ -66,6 +68,14 @@ export class FakeDb {
 
   id(): string {
     return `00000000-0000-4000-8000-${String(this.nextId++).padStart(12, '0')}`;
+  }
+
+  private lastStamp = 0;
+
+  /** A created_at for an inserted row: now, and later than the last one. */
+  stamp(): string {
+    this.lastStamp = Math.max(Date.now(), this.lastStamp + 1);
+    return new Date(this.lastStamp).toISOString();
   }
 
   rows(table: string): Row[] {
@@ -342,7 +352,16 @@ class FakeQuery implements PromiseLike<{ data: unknown; error: FakeError | null 
     }
 
     if (this.op === 'insert') {
-      const added = this.payload.map((row) => ({ id: this.db.id(), ...row }));
+      // created_at is the column default every table has. Stamped strictly
+      // increasing, as microsecond timestamps effectively are, so "newest
+      // first" is never a tie between two rows written in one millisecond.
+      const defaults = this.db.defaults[this.table] ?? {};
+      const added = this.payload.map((row) => ({
+        id: this.db.id(),
+        created_at: this.db.stamp(),
+        ...defaults,
+        ...row,
+      }));
       rows.push(...added);
       return this.returning ? this.shape(added) : { data: null, error: null };
     }

@@ -6,7 +6,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { approvalPatch } from '@/lib/cadence/approvals';
+import { approvalPatch, wakeSequenceLead } from '@/lib/cadence/approvals';
 import { supabaseServer } from '@/lib/supabase/server';
 
 const bodySchema = z.object({
@@ -40,7 +40,7 @@ export async function PATCH(
     // RLS scopes this to the caller's workspace.
     const { data: action } = await db
       .from('actions')
-      .select('id, workspace_id, lead_id, channel, status')
+      .select('id, workspace_id, lead_id, channel, status, sequence_id, step_number')
       .eq('id', id)
       .single();
     if (!action) return NextResponse.json({ error: 'Action not found' }, { status: 404 });
@@ -66,6 +66,9 @@ export async function PATCH(
         .update({ status: 'blocked', block_reason: 'rejected_by_user' })
         .eq('id', id);
       if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+      // A rejected sequence step stops the run as step_rejected on the next
+      // pass, rather than on the day the draft would have expired.
+      await wakeSequenceLead(db, action);
       return NextResponse.json({ data: { id, status: 'blocked' } });
     }
 
@@ -77,6 +80,9 @@ export async function PATCH(
 
     const { error } = await db.from('actions').update(patch).eq('id', id);
     if (error) return NextResponse.json({ error: error.message }, { status: 400 });
+    // The next step's delay counts from this step's send, so the runner has
+    // to look at the lead again now rather than when the draft would expire.
+    await wakeSequenceLead(db, action);
     if (patch.status === 'blocked') {
       return NextResponse.json(
         { error: `Blocked by the consent gate: ${patch.block_reason}`, data: { id, status: 'blocked' } },

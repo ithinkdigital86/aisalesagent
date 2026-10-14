@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 
 import { SendingBanner } from '@/components/sending/sending-banner';
 import { parseSteps } from '@/lib/cadence/sequence';
+import { loadCurrentStepAttempts, progressFor } from '@/lib/cadence/sequence-progress';
 import { loadSendStatus } from '@/lib/cadence/send-controls';
 import { supabaseServer } from '@/lib/supabase/server';
 import { SequenceManager, type EnrolledLead, type SequenceRow } from './sequence-manager';
@@ -53,6 +54,9 @@ export default async function SequencesPage() {
     meetingCount: sequence.meeting_count,
   }));
 
+  const attempts = await loadCurrentStepAttempts(db, leads ?? []);
+  const stepsOf = new Map(rows.map((row) => [row.id, row.steps]));
+
   const enrolled: EnrolledLead[] = (leads ?? []).map((lead) => ({
     id: lead.id,
     name: lead.full_name ?? lead.company_name ?? 'Unnamed lead',
@@ -61,7 +65,7 @@ export default async function SequencesPage() {
     sequenceId: lead.assigned_sequence_id as string,
     step: lead.sequence_step,
     stoppedReason: lead.sequence_stopped_reason,
-    nextActionAt: lead.next_action_at,
+    progress: progressFor(lead, stepsOf.get(lead.assigned_sequence_id as string) ?? [], attempts),
   }));
 
   return (

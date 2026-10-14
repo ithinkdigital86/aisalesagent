@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { FakeDb, asClient } from './testing/fake-postgrest.ts';
-import { approvalPatch } from './approvals.ts';
+import { approvalPatch, wakeSequenceLead } from './approvals.ts';
 
 const WS = 'ws-1';
 const LEAD = 'lead-1';
@@ -66,4 +66,48 @@ test('a LinkedIn draft for a clean lead is approved and records the basis', asyn
 test('email is queued without a gate here, because the send path runs it', async () => {
   const patch = await approve(world({ stage: 'suppressed' }), 'email');
   assert.deepEqual(patch, { status: 'queued', scheduled_for: NOW });
+});
+
+// ---------------------------------------------------------------
+// Waking a sequence lead after its draft is decided
+// ---------------------------------------------------------------
+
+const LATER = '2026-10-27T18:30:00.000Z';
+
+function sequenceLead(over: Record<string, unknown> = {}) {
+  return {
+    id: LEAD,
+    workspace_id: WS,
+    assigned_sequence_id: 'seq-1',
+    sequence_step: 2,
+    sequence_stopped_reason: null,
+    next_action_at: LATER,
+    ...over,
+  };
+}
+
+const draft = { workspace_id: WS, lead_id: LEAD, sequence_id: 'seq-1', step_number: 2 };
+
+test('approving or rejecting a sequence draft brings the lead forward to now', async () => {
+  const db = new FakeDb({ leads: [sequenceLead()] });
+  assert.equal(await wakeSequenceLead(asClient(db), draft, NOW), null);
+  assert.equal(db.rows('leads')[0].next_action_at, NOW);
+});
+
+test('a lead that has moved on, stopped or changed sequence is left alone', async () => {
+  for (const over of [
+    { sequence_step: 3 },
+    { sequence_stopped_reason: 'reply' },
+    { assigned_sequence_id: 'seq-2' },
+  ]) {
+    const db = new FakeDb({ leads: [sequenceLead(over)] });
+    await wakeSequenceLead(asClient(db), draft, NOW);
+    assert.equal(db.rows('leads')[0].next_action_at, LATER, JSON.stringify(over));
+  }
+});
+
+test('a draft that is not a sequence step touches no lead', async () => {
+  const db = new FakeDb({ leads: [sequenceLead()] });
+  await wakeSequenceLead(asClient(db), { ...draft, sequence_id: null, step_number: null }, NOW);
+  assert.equal(db.rows('leads')[0].next_action_at, LATER);
 });

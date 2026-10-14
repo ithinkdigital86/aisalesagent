@@ -9,7 +9,8 @@
 //
 // `doubles` swaps whole modules, keyed by their `@/` specifier, for a test
 // double. The swap is by resolved file, so a module reached through a
-// relative import is swapped too.
+// relative import is swapped too. A package specifier (`next/cache`) is
+// swapped wherever it is imported by exactly that name.
 
 import * as nodeModule from 'node:module';
 import path from 'node:path';
@@ -54,7 +55,12 @@ export function registerRouteLoader(doubles: Record<string, string> = {}): void 
   registered = true;
 
   const swaps = new Map<string, string>();
+  const packages = new Map<string, string>();
   for (const [specifier, replacement] of Object.entries(doubles)) {
+    if (!specifier.startsWith('@/')) {
+      packages.set(specifier, replacement);
+      continue;
+    }
     for (const ext of CANDIDATES) {
       swaps.set(pathToFileURL(path.join(ROOT, specifier.slice(2)) + ext).href, replacement);
     }
@@ -62,6 +68,9 @@ export function registerRouteLoader(doubles: Record<string, string> = {}): void 
 
   registerHooks({
     resolve(specifier, context, nextResolve) {
+      const swappedPackage = packages.get(specifier);
+      if (swappedPackage) return { url: swappedPackage, shortCircuit: true };
+
       const target = specifier.startsWith('@/')
         ? pathToFileURL(path.join(ROOT, specifier.slice(2))).href
         : specifier;
