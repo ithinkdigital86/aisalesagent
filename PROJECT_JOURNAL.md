@@ -508,3 +508,75 @@ the banners on all three pages, enrolment naming both refused leads, the
 stuck-row count, no console errors. Not exercised live: the cron routes,
 since they run across every workspace. The throwaway user and workspace were
 deleted afterwards and nothing was left behind.
+
+### 2026-10-14 Cron route tests, and an unset CRON_SECRET let anyone in
+
+**Problem.** The three crons (sales-manager, send-queue, follow-up) run
+unattended across every workspace and had no tests, and the last session
+could not exercise them live for the same reason. Writing the tests turned
+up a hole: every route compared the header against
+`` `Bearer ${process.env.CRON_SECRET}` ``, so with the variable unset the
+literal header `Bearer undefined` passed. Vercel's own calls send no header
+in that state, so nothing showed it.
+
+**Change.**
+
+- `lib/cadence/cron-auth.ts`: `isCronRequest()`, used by all three routes.
+  An unset or empty secret refuses every request.
+- 37 tests in `app/api/cron/`: `auth.test.ts` for the secret on all three
+  routes, and a `route.test.ts` beside each route. `npm test` now runs
+  `app/**/*.test.ts` as well as `lib/`.
+- `lib/cadence/testing/route-loader.ts`: a `module.registerHooks` resolver
+  so node --test can load route files, which import through `@/` and without
+  extensions, and can swap whole modules for doubles. `cron-doubles.ts`
+  stands in for `lib/supabase/server` (returns the FakeDb) and
+  `lib/cadence/runtime` (scripted model results). `cron-world.ts` builds
+  workspaces, leads, sequences and queued email, and replaces fetch: Resend
+  answers, any other host throws, so a test cannot reach Anthropic or OpenAI.
+- Fake PostgREST: `or()` takes `is.null` and `not.is.null` terms (the
+  follow-up query), and `faults` fails chosen statements, for testing what a
+  caller does with one workspace's error.
+
+Everything under the routes runs for real: the sequence runner, the send
+queue, the consent gate, the email adapter and the fake's copy of
+`claim_email_send`.
+
+**Covered.** Secret: missing, wrong, no `Bearer`, unset, empty, and right; a
+refused request touches no database, model or email. Kill switch: send queue
+and follow-up leave paused workspaces alone and their leads keep their date,
+the sales manager runs for them anyway, and an unreadable switch is a 500
+with nothing done. Cap: delivery stops at it oldest first with the rest
+queued and the right retry time, a full workspace does not pay for a draft,
+one capped workspace does not hold up another. Fit: below-minimum and
+unscored leads are not drafted to and are deferred a day at their step; a
+lead at the minimum is drafted and sent on the same pass. Isolation: a
+failed review, a thrown error, a failed model call, a failed suppression
+write (the run still ends 500, after every lead), a failed Resend call and a
+failed draft each stay in their own workspace.
+
+**Decisions worth knowing.**
+
+- The follow-up cron does not check the minimum fit score and was left that
+  way: it drafts and sends nothing, it is where replies are read, and leads
+  skipped while still due would fill its 100-lead batch. A test records it;
+  that is the one to turn around if the decision changes.
+- In the send queue, a failed read of one workspace's limits throws and
+  fails the whole run, so other workspaces send nothing that tick. The
+  route says this is deliberate (fail closed). Not tested either way.
+- `@types/node` is pinned at 20, which predates `registerHooks`, so the
+  loader declares the slice it uses rather than upgrading the package.
+
+**Not done.** Unsubscribe tokens are signed with `CRON_SECRET ?? ''`, so with
+the secret unset they are signed with an empty key and anyone can make one.
+Same root cause, different file; left for its own change.
+
+**Tests.** Each guard was disabled in turn to check its test fails: the
+unset-secret check, the follow-up and sequence-pass kill switch, the fit
+check, the cap, and the sales manager's per-workspace catch. The switch and
+the cap are each enforced twice (the queue's look-ahead and the claim), so
+those tests only fail with both removed, which is the design.
+
+**Verification.** `tsc`, `npm test` (256 passing, three full runs; the
+first run failed once on a millisecond race between two timestamps in one
+test, which was fixed), `npm run lint`, `npm run build`. Nothing was run
+against the live database or Resend.
